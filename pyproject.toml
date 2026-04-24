@@ -1,0 +1,14 @@
+[project]
+name = "smart-fuzzer"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.0",
+    "json5>=0.14.0",
+    "openai>=2.32.0",
+    "pydantic>=2.13.3",
+    "pytest>=9.0.3",
+    "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.26",
+    "uvicorn>=0.45.0",
+]
