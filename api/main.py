@@ -16,9 +16,16 @@ app = FastAPI(
     version="1.0",
 )
 
+FORBIDDEN = ["import os", "import sys", "import subprocess", "exec", "eval", "__import__"]
 
 @app.post("/fuzzer_test", response_model=FuzzReport)
 async def fuzzer_test(function_code: str = Body(..., media_type="text/plain")):
+    for pattern in FORBIDDEN:
+        if pattern in function_code:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Запрещённая конструкция: {pattern}"
+            )
     try:
         namespace = {}
         exec(function_code, namespace)
