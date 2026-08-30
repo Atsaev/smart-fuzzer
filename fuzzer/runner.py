@@ -69,7 +69,8 @@ def _classify(expected: Expected, exc: BaseException | None, actual_value):
         return TestStatus.ERROR, False
 
     if expected.name is None:
-        return TestStatus.PASSED, False
+        # ожидание исключения без типа — классифицировать нечего
+        return TestStatus.ERROR, False
     if expected.name.lower() == type(exc).__name__.lower():
         return TestStatus.PASSED, False
     return TestStatus.VULNERABILITY, True
@@ -174,6 +175,19 @@ def _build_call(func, input_data):
     return (input_data,), {}
 
 
+def _log_verdict(test_case: TestCase, outcome: "_Outcome", status: TestStatus) -> None:
+    """Лог для аудита: ожидание, факт, вердикт."""
+    if outcome.exc is not None:
+        actual = {"type": "exception", "name": type(outcome.exc).__name__}
+    else:
+        actual = {"type": "return", "value": outcome.value}
+    print(
+        f"  [test] input={test_case.input_data} "
+        f"expected={test_case.expected.model_dump()} "
+        f"actual={actual} verdict={status.value}"
+    )
+
+
 def _run_single(func, test_case: TestCase, func_source: str | None) -> TestResult:
     """Одиночный вызов: вердикт + аннотация + пост-условия + стабильность."""
     call_input = copy.deepcopy(test_case.input_data)
@@ -191,6 +205,7 @@ def _run_single(func, test_case: TestCase, func_source: str | None) -> TestResul
     unstable = not _outcomes_equal(first, second)
 
     status, is_vuln = _classify(test_case.expected, first.exc, first.value)
+    _log_verdict(test_case, first, status)
 
     if status == TestStatus.PASSED:
         if func_source:

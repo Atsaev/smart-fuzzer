@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class TestStatus(str, Enum):
@@ -15,7 +15,14 @@ class Expected(BaseModel):
     """Структурированное ожидание — классификатор работает только с ним."""
     type: Literal["return", "exception"]
     value: Any = None        # для type="return" (null означает ожидание None)
-    name: str | None = None  # для type="exception"; None = любое исключение
+    name: str | None = None  # для type="exception" — ОБЯЗАТЕЛЕН
+
+    @field_validator("name")
+    @classmethod
+    def _name_required_for_exception(cls, name, info):
+        if info.data.get("type") == "exception" and not name:
+            raise ValueError("для exception обязательно указать name")
+        return name
 
 
 class Postconditions(BaseModel):
