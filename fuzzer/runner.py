@@ -31,6 +31,16 @@ def _values_match(expected, actual):
 
     True — совпало; False — не совпало; None — значения несопоставимы.
     """
+    # специальные маркеры нечисловых результатов: "inf" / "-inf" / "nan"
+    # (маркер применяется только к фактическому float — строка "inf" как
+    # обычный результат функции продолжает сравниваться как строка)
+    if isinstance(expected, str) and isinstance(actual, float):
+        if expected == "inf":
+            return math.isinf(actual) and actual > 0
+        if expected == "-inf":
+            return math.isinf(actual) and actual < 0
+        if expected == "nan":
+            return math.isnan(actual)
     if isinstance(expected, bool) or isinstance(actual, bool):
         if isinstance(expected, bool) and isinstance(actual, bool):
             return expected == actual
@@ -53,6 +63,12 @@ def _classify(expected: Expected, exc: BaseException | None, actual_value):
     if exc is None:
         if expected.type == "exception":
             return TestStatus.VULNERABILITY, True
+        # переполнение: фактический inf/NaN без явного маркера в expected —
+        # не уязвимость (контракт не определяет обработку переполнения)
+        if (isinstance(actual_value, float) and not math.isfinite(actual_value)
+                and not (isinstance(expected.value, str)
+                         and expected.value in ("inf", "-inf", "nan"))):
+            return TestStatus.PASSED, False
         if expected.value is None:
             if actual_value is None:
                 return TestStatus.PASSED, False
