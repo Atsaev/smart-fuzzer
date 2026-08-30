@@ -1,4 +1,5 @@
 import ast
+import builtins
 import json
 import os
 import re
@@ -158,6 +159,14 @@ def _build_prompt(function_code: str) -> str:
 - Если функция ЯВНО определяет поведение для конкретного входа (например, `if not items: return None`, `if not isinstance(items, list): raise TypeError`) — НЕ объявляй это поведение ошибкой. expected должен соответствовать явному поведению функции для этого входа.
 - Для функций со строками обязательно включай тесты с внутренними пробелами ("John Doe"), краевыми пробелами, регистром.
 - Для функций с диапазонами (clamp и т.п.) обязательно включай value ниже минимума и выше максимума с конкретными ожиданиями.
+СТРОГАЯ ПРОВЕРКА ТЕСТ-КЕЙСА ПЕРЕД ВЫВОДОМ:
+- input_data, expected и reason должны описывать ОДИН И ТОТ ЖЕ сценарий: фактические значения input_data должны соответствовать reason.
+- Типы JSON: array -> Python list; object -> dict; string -> str; number -> int/float; boolean -> bool; null -> None. Python tuple, set, bytes и кастомные объекты ЧЕРЕЗ JSON НЕПЕРЕДАВАЕМЫ — тесты вида "кортеж вместо списка" запрещены: JSON array всегда становится list.
+- НЕ ожидай TypeError для входа, который фактически соответствует допустимому типу параметра (например, для `if not isinstance(items, list): raise TypeError` список [1, 2, 3] — допустимый вход).
+- expected exception допустим ТОЛЬКО если тип исключения: явно указан в контракте функции; явно бросается в коде (raise); однозначно следует из документации. Если конкретный тип исключения неизвестен — НЕ выдумывай имя.
+- reason должен описывать именно значения из input_data, а не гипотетический другой тип входа.
+- expected вычисляется из input_data и контракта, а не из предполагаемого поведения другого типа входа.
+- Верни РОВНО 10 тест-кейсов; перед ответом пересчитай количество и дополни недостающие.
 
 Числовые результаты и переполнение:
 - Для ожидаемых числовых результатов учитывай промежуточные операции и ограничения типа данных. НЕ считай математически конечный результат корректным expected, если сама корректная реализация неизбежно получает переполнение на промежуточном вычислении (например, (x * x) / y при больших x: промежуточное x * x может дать inf, и корректный результат будет inf, а не математический).
@@ -264,6 +273,168 @@ def _extract_raises(code: str) -> list[str]:
     return sorted(names)
 
 
+def _extract_params(code: str) -> tuple[set[str], set[str]]:
+    """(обязательные параметры, все параметры) первой функции в коде."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            args = node.args
+            names: set[str] = set()
+            required: set[str] = set()
+            positional = list(args.posonlyargs) + list(args.args)
+            defaults = list(args.defaults)
+            for i, arg in enumerate(positional):
+                names.add(arg.arg)
+                if i < len(positional) - len(defaults):
+                    required.add(arg.arg)
+            for arg, d in zip(args.kwonlyargs, args.kw_defaults):
+                names.add(arg.arg)
+                if d is None:
+                    required.add(arg.arg)
+            if args.vararg:
+                names.add(args.vararg.arg)
+            if args.kwarg:
+                names.add(args.kwarg.arg)
+            return required, names
+    return set(), set()
+
+
+def _raise_names(stmts: list[ast.stmt]) -> list[str]:
+    """Имена исключений из raise прямо в блоке (без вложенных if)."""
+    names: list[str] = []
+    for stmt in stmts:
+        if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+            exc = stmt.exc.func if isinstance(stmt.exc, ast.Call) else stmt.exc
+            if isinstance(exc, ast.Name):
+                names.append(exc.id)
+    return names
+
+
+def _type_names(node: ast.AST) -> list[str] | None:
+    """Имена типов из выражения типа: Name, Subscript, Tuple."""
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, ast.Subscript):
+        return _type_names(node.value)
+    if isinstance(node, ast.Tuple):
+        out: list[str] = []
+        for elt in node.elts:
+            sub = _type_names(elt)
+            if sub is None:
+                return None
+            out.extend(sub)
+        return out
+    return None
+
+
+def _isinstance_ok(value, type_names: list[str]) -> bool:
+    """Проходит ли value хотя бы один из указанных builtin-типов."""
+    for name in type_names:
+        ty = getattr(builtins, name, None)
+        if ty is not None and isinstance(value, ty):
+            return True
+    return False
+
+
+def _isinstance_components(test: ast.expr) -> list[tuple[str, list[str]]] | None:
+    """Компоненты условия вида `not isinstance(x, T) or ...`.
+    None — условие не разбирается, guard не учитываем."""
+    def one(node: ast.expr) -> tuple[str, list[str]] | None:
+        if not (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not)):
+            return None
+        call = node.operand
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == "isinstance" and len(call.args) == 2):
+            return None
+        arg = call.args[0]
+        if not isinstance(arg, ast.Name):
+            return None
+        types = _type_names(call.args[1])
+        if not types:
+            return None
+        return arg.id, types
+
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        comp = one(test)
+        return [comp] if comp else None
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        comps = [one(op) for op in test.values]
+        if any(c is None for c in comps):
+            return None
+        return comps
+    return None
+
+
+def _isinstance_guards(code: str) -> dict[str, list[list[tuple[str, list[str]]]]]:
+    """Тип исключения -> guard-условия (каждое — список компонент),
+    при которых оно бросается."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    guards: dict[str, list[list[tuple[str, list[str]]]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        exc_names = _raise_names(node.body)
+        if not exc_names:
+            continue
+        comps = _isinstance_components(node.test)
+        if comps is None:
+            continue
+        for exc in exc_names:
+            guards.setdefault(exc, []).append(comps)
+    return guards
+
+
+def _is_exc_name(name: str) -> bool:
+    ty = getattr(builtins, name, None)
+    return isinstance(ty, type) and issubclass(ty, BaseException)
+
+
+def _unjustified_exception(case: TestCase, guards: dict) -> bool:
+    """expected-исключение не следует из кода для данного входа."""
+    exp = case.expected
+    if isinstance(exp, list):
+        return False
+    if exp.type != "exception" or not exp.name:
+        return False
+    if not _is_exc_name(exp.name):
+        return True  # выдуманный тип исключения
+    if exp.name not in guards:
+        return False  # нет isinstance-guard'ов — судить не можем
+    if not isinstance(case.input_data, dict):
+        return False  # последовательности не проверяем
+    for group in guards[exp.name]:
+        for param, types in group:
+            if param not in case.input_data:
+                continue  # параметр не передан (дефолт) — не нарушен
+            if not _isinstance_ok(case.input_data[param], types):
+                return False  # вход реально нарушает guard — исключение оправдано
+    return True  # вход проходит все guard'ы — исключение не следует из кода
+
+
+def _validate_cases(code: str, cases: list[TestCase]) -> list[TestCase]:
+    """Детерминированная фильтрация невалидных тест-кейсов."""
+    required, all_params = _extract_params(code)
+    guards = _isinstance_guards(code)
+    valid: list[TestCase] = []
+    for case in cases:
+        if isinstance(case.input_data, dict):
+            keys = set(case.input_data)
+            if not keys <= all_params or not required <= keys:
+                print(f"-> Валидатор: input_data не совпадает с сигнатурой: {case.input_data}")
+                continue
+        if _unjustified_exception(case, guards):
+            print(f"-> Валидатор: expected {case.expected} не следует из кода для {case.input_data}, отбрасываю")
+            continue
+        valid.append(case)
+    return valid
+
+
 def _refine_expectations(client, code: str, cases: list[TestCase]) -> list[TestCase]:
     """Независимый oracle: пересчитывает expected по сигнатуре и контракту,
     НЕ видя тело функции (исключения из валидаций передаются как подсказка)."""
@@ -319,6 +490,12 @@ def _refine_expectations(client, code: str, cases: list[TestCase]) -> list[TestC
 
     refined = []
     for case, exp_item in zip(cases, parsed):
+        if case.is_sequence:
+            # oracle считает ожидания по одному на тест-кейс (не по вызовам) и
+            # не видит тело: для последовательностей draft с ожиданиями по
+            # каждому вызову надёжнее — не даём oracle их ломать
+            refined.append(case)
+            continue
         if not isinstance(exp_item, dict):
             refined.append(case)
             continue
@@ -408,5 +585,7 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
             f"Сырой ответ:\n{raw_content}"
         )
 
+    # детерминированная фильтрация невалидных тест-кейсов
+    result = _validate_cases(function_code, result)
     # независимый oracle: пересчитывает ожидания без тела функции
     return _refine_expectations(client, function_code, result)
