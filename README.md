@@ -82,7 +82,7 @@ Response:
 
 ## Security
 
-The API blocks dangerous constructs: `import os`, `import sys`, `import subprocess`, `exec`, `eval`, `__import__`.
+The API executes user code only inside a sandbox: RestrictedPython blocks import statements and private attribute access at compile time, execution runs in a separate process with resource limits (CPU, memory, processes, fds), privileges are dropped to nobody, and a hard timeout kills the process. Whitelisted stdlib modules without I/O can be imported inside the analyzed function via import_module, e.g. json = import_module('json').
 
 ## Project Structure
 ```
