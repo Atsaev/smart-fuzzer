@@ -1,8 +1,10 @@
 import ast
 import textwrap
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 
 from fuzzer.generator import generate_test_cases
 from fuzzer.sandbox import SandboxError, run_all_tests_sandboxed, validate_code
@@ -14,8 +16,20 @@ load_dotenv()
 app = FastAPI(
     title="Smart fuzzer inspector",
     description="Инспектор функций для поиска уязвимостей",
-    version="1.1",
+    version="1.2",
 )
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def index() -> str:
+    """Landing page: зачем нужен фаззер и как им пользоваться."""
+    page = _STATIC_DIR / "index.html"
+    if not page.exists():
+        raise HTTPException(status_code=404, detail="Страница не найдена")
+    return page.read_text(encoding="utf-8")
+
 
 
 def _detect_function_name(code: str) -> str:

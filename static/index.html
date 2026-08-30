@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Fuzzer — LLM-поиск багов в Python-функциях</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #11161d;
+    --panel2: #0e1319;
+    --border: #1e2733;
+    --text: #c8d3e0;
+    --muted: #6b7a8d;
+    --accent: #37e08a;
+    --vuln: #ff5c5c;
+    --warn: #ffb454;
+    --blue: #5aa9ff;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.6;
+    padding-bottom: 60px;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* header */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 28px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    background: linear-gradient(180deg, #10161e 0%, var(--bg) 100%);
+  }
+  .logo { color: var(--accent); font-weight: 700; }
+  .logo::before { content: "❯ "; }
+  .subtitle { color: var(--muted); font-size: 13px; }
+  .live {
+    margin-left: auto;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    border-radius: 999px;
+    padding: 2px 12px;
+    font-size: 12px;
+    letter-spacing: 1px;
+  }
+
+  /* sections */
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 20px; }
+  section { margin-bottom: 40px; }
+  h2 {
+    font-size: 16px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 16px;
+  }
+  h2::before { content: "## "; color: var(--muted); }
+  h3 { color: var(--blue); font-size: 14px; margin-bottom: 6px; }
+
+  p.lead { color: var(--muted); max-width: 780px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .num { color: var(--accent); font-size: 12px; }
+  .card p { color: var(--muted); font-size: 13px; }
+
+  /* pipeline */
+  .pipe {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    flex-wrap: wrap;
+    margin-top: 14px;
+  }
+  .stage {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    flex: 1 1 150px;
+    min-width: 150px;
+  }
+  .stage b { color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .stage span { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .arrow {
+    align-self: center;
+    color: var(--muted);
+    padding: 0 8px;
+    font-size: 18px;
+  }
+
+  ol.steps { margin: 14px 0 0 20px; color: var(--muted); }
+  ol.steps li { margin-bottom: 8px; }
+  ol.steps code, .inline {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--accent);
+    font-size: 12px;
+  }
+
+  /* lab */
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+  .toolbar .group-label {
+    align-self: center;
+    color: var(--muted);
+    font-size: 12px;
+    margin-right: 4px;
+  }
+  .example-btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .example-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .example-btn.bug:hover { border-color: var(--vuln); color: var(--vuln); }
+
+  textarea {
+    width: 100%;
+    min-height: 260px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 14px;
+    resize: vertical;
+    tab-size: 4;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+
+  .run-row { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+  #run {
+    background: var(--accent);
+    color: #06120b;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 22px;
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  #run:hover { filter: brightness(1.1); }
+  #run:disabled { opacity: .5; cursor: wait; }
+  #status { color: var(--muted); font-size: 13px; }
+  #status .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* results */
+  #results { margin-top: 20px; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .stat {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 13px;
+    background: var(--panel);
+  }
+  .stat b { font-size: 16px; }
+  .stat.total b { color: var(--text); }
+  .stat.pass b { color: var(--accent); }
+  .stat.vuln b { color: var(--vuln); }
+  .stat.err b { color: var(--warn); }
+
+  .summary {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    color: var(--text);
+    font-size: 13px;
+    white-space: pre-wrap;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    background: var(--panel2);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 1px; background: var(--panel); }
+  tr:last-child td { border-bottom: none; }
+  td pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    max-width: 420px;
+  }
+  td.mono { font-family: var(--mono); color: var(--muted); font-size: 12px; word-break: break-word; }
+
+  .badge {
+    display: inline-block;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    white-space: nowrap;
+  }
+  .badge.ok { background: rgba(55,224,138,.12); color: var(--accent); border: 1px solid rgba(55,224,138,.4); }
+  .badge.vuln { background: rgba(255,92,92,.12); color: var(--vuln); border: 1px solid rgba(255,92,92,.4); }
+  .badge.err { background: rgba(255,180,84,.12); color: var(--warn); border: 1px solid rgba(255,180,84,.4); }
+
+  tr.row-vuln td { background: rgba(255,92,92,.05); }
+  .errbox {
+    background: rgba(255,92,92,.08);
+    border: 1px solid rgba(255,92,92,.5);
+    color: var(--vuln);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 18px 28px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
+  footer .accent { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">smart-fuzzer</div>
+  <div class="subtitle">LLM-поиск багов в Python-функциях</div>
+  <div class="live">LIVE</div>
+</header>
+
+<main>
+
+  <!-- ЗАЧЕМ -->
+  <section id="why">
+    <h2>Зачем нужен фаззер</h2>
+    <p class="lead">
+      Обычные юнит-тесты проверяют happy-path: функция «не падает» на типовых входных данных.
+      Логические баги — <span class="inline">clamp</span> возвращает максимум вместо минимума,
+      <span class="inline">percentage</span> забыл умножить на 100, функция мутирует вход —
+      такие ошибки happy-path тесты пропускают. Фаззер генерирует агрессивные входные данные
+      и сверяет фактическое поведение с контрактом функции.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <div class="num">01</div>
+        <h3>LLM генерирует тесты</h3>
+        <p>DeepSeek анализирует сигнатуру и семантику функции и создаёт до 10 adversarial-кейсов:
+        границы, неверные типы, переполнение, мутации, повторы.</p>
+      </div>
+      <div class="card">
+        <div class="num">02</div>
+        <h3>Независимый oracle</h3>
+        <p>Ожидаемый результат пересчитывается по контракту <b>без тела функции</b> — фаззер не
+        «зеркалит» баг из реализации.</p>
+      </div>
+      <div class="card">
+        <div class="num">03</div>
+        <h3>Песочница исполняет</h3>
+        <p>Код выполняется изолированно: RestrictedPython, отдельный процесс, лимиты CPU/памяти,
+        таймаут, права nobody. <span class="inline">import os</span> не пройдёт.</p>
+      </div>
+      <div class="card">
+        <div class="num">04</div>
+        <h3>Вердикт — детерминированный</h3>
+        <p>PASS / VULNERABILITY / ERROR выносит код-компаратор по structured expected.
+        LLM пишет только объяснение — она не решает, уязвимость это или нет.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ПАЙПЛАЙН -->
+  <section id="pipeline">
+    <h2>Как это работает</h2>
+    <div class="pipe">
+      <div class="stage"><b>Функция</b><span>код из редактора</span></div>
+      <div class="arrow">→</div>
+      <div class="stage"><b>LLM-генерация</b><span>10 тест-кейсов: input + expected + postconditions</span></div>
+      <div class="arrow">→</div>
+      <div class="stage"><b>Валидатор</b><span>отбрасывает невалидные тесты (типы, сигнатура)</span></div>
+      <div class="arrow">→</div>
+      <div class="stage"><b>Oracle</b><span>пересчёт expected по контракту без тела</span></div>
+      <div class="arrow">→</div>
+      <div class="stage"><b>Песочница</b><span>каждый тест в отдельном процессе</span></div>
+      <div class="arrow">→</div>
+      <div class="stage"><b>Компаратор</b><span>PASS / VULNERABILITY / ERROR</span></div>
+      <div class="arrow">→</div>
+      <div class="stage"><b>Отчёт</b><span>вердикты + LLM-summary</span></div>
+    </div>
+  </section>
+
+  <!-- КАК ПОЛЬЗОВАТЬСЯ -->
+  <section id="howto">
+    <h2>Как пользоваться</h2>
+    <ol class="steps">
+      <li>Вставьте Python-функцию в редактор (или загрузите пример кнопкой).</li>
+      <li>Нажмите <span class="inline">Запустить фаззинг</span> — займёт ~20–90 секунд.</li>
+      <li>Смотрите вердикты: <span class="inline">PASS</span> — поведение соответствует контракту;
+        <span class="inline">VULNERABILITY</span> — фактический результат отклоняется от ожидаемого
+        (неправильное значение, неверный тип исключения, мутация входа); <span class="inline">ERROR</span> —
+        ошибка окружения/песочницы, не тестируемой функции.</li>
+    </ol>
+  </section>
+
+  <!-- ЛАБОРАТОРИЯ -->
+  <section id="lab">
+    <h2>Лаборатория</h2>
+    <div class="toolbar">
+      <span class="group-label">функции с багами:</span>
+      <button class="example-btn bug" data-ex="percentage_bug">percentage</button>
+      <button class="example-btn bug" data-ex="clamp_bug">clamp</button>
+      <button class="example-btn bug" data-ex="reverse_list_bug">reverse_list</button>
+      <button class="example-btn bug" data-ex="normalize_name_bug">normalize_name</button>
+      <span class="group-label">корректные:</span>
+      <button class="example-btn" data-ex="safe_divide_ok">safe_divide</button>
+      <button class="example-btn" data-ex="remove_duplicates_ok">remove_duplicates</button>
+    </div>
+
+    <textarea id="code" spellcheck="false" placeholder="# вставьте Python-функцию..."></textarea>
+
+    <div class="run-row">
+      <button id="run">▶ Запустить фаззинг</button>
+      <div id="status"></div>
+    </div>
+
+    <div id="results"></div>
+  </section>
+
+</main>
+
+<footer>
+  Вердикт выносит <span class="accent">детерминированный компаратор</span> — LLM генерирует тесты и объясняет результаты,
+  но не решает, является ли поведение уязвимостью. · <a href="https://github.com/Atsaev/smart-fuzzer" target="_blank" rel="noopener">GitHub</a> · API docs: <a href="/docs" target="_blank" rel="noopener">/docs</a>
+</footer>
+
+<script>
+"use strict";
+
+const EXAMPLES = {
+  percentage_bug: {
+    label: "percentage — баг: забыт *100",
+    code: `def percentage(value, total):
+    if not isinstance(value, (int, float)):
+        raise TypeError
+    if not isinstance(total, (int, float)):
+        raise TypeError
+    if total == 0:
+        raise ValueError("total cannot be zero")
+    return value / total`
+  },
+  clamp_bug: {
+    label: "clamp — баг: value < min возвращает max",
+    code: `def clamp(value, minimum, maximum):
+    if minimum > maximum:
+        raise ValueError
+    if value < minimum:
+        return maximum
+    if value > maximum:
+        return maximum
+    return value`
+  },
+  reverse_list_bug: {
+    label: "reverse_list — баг: return items",
+    code: `def reverse_list(items):
+    if not isinstance(items, list):
+        raise TypeError
+    return items`
+  },
+  normalize_name_bug: {
+    label: "normalize_name — баг: удаляет пробелы",
+    code: `def normalize_name(name):
+    if not isinstance(name, str):
+        raise TypeError
+    return name.strip().lower().replace(" ", "")`
+  },
+  safe_divide_ok: {
+    label: "safe_divide — корректная",
+    code: `def safe_divide(a, b):
+    if b == 0:
+        raise ValueError("division by zero")
+    return a / b`
+  },
+  remove_duplicates_ok: {
+    label: "remove_duplicates — корректная",
+    code: `def remove_duplicates(items):
+    if not isinstance(items, list):
+        raise TypeError
+
+    result = []
+
+    for item in items:
+        if item not in result:
+            result.append(item)
+
+    return result`
+  }
+};
+
+const $ = (sel) => document.querySelector(sel);
+const codeEl = $("#code");
+const statusEl = $("#status");
+const resultsEl = $("#results");
+const runBtn = $("#run");
+
+const STATUS = {
+  passed:        { text: "PASS",           cls: "ok" },
+  vulnerability: { text: "VULNERABILITY",  cls: "vuln" },
+  error:         { text: "ERROR",          cls: "err" },
+  failed:        { text: "FAIL",           cls: "err" }
+};
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function fmt(v) {
+  if (v === null || v === undefined) return "null";
+  if (typeof v === "string") return JSON.stringify(v);
+  return JSON.stringify(v);
+}
+
+function fmtExpected(e) {
+  if (Array.isArray(e)) {
+    return e.map(fmtExpected).join(" → ");
+  }
+  if (e.type === "exception") return "raises " + e.name;
+  return "→ " + fmt(e.value);
+}
+
+function fmtInput(data) {
+  if (Array.isArray(data)) {
+    return data.map(fmt).join("  ⇒  ");
+  }
+  return fmt(data);
+}
+
+// --- примеры ---
+document.querySelectorAll(".example-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const ex = EXAMPLES[btn.dataset.ex];
+    if (!ex) return;
+    codeEl.value = ex.code;
+    resultsEl.innerHTML = "";
+    statusEl.textContent = "загружен пример: " + ex.label;
+  });
+});
+
+// --- запуск ---
+runBtn.addEventListener("click", runFuzz);
+
+async function runFuzz() {
+  const code = codeEl.value.trim();
+  if (!code) {
+    statusEl.textContent = "вставьте функцию";
+    return;
+  }
+  runBtn.disabled = true;
+  resultsEl.innerHTML = "";
+  const started = Date.now();
+  statusEl.innerHTML = '<span class="spin">◌</span> фаззинг... (LLM генерирует тесты, oracle пересчитывает expected, песочница исполняет)';
+
+  try {
+    const resp = await fetch("fuzzer_test", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: code
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      const detail = data && data.detail ? data.detail : "HTTP " + resp.status;
+      statusEl.textContent = "";
+      resultsEl.innerHTML = '<div class="errbox">' + esc(detail) + "</div>";
+      return;
+    }
+    const secs = ((Date.now() - started) / 1000).toFixed(1);
+    statusEl.textContent = "готово за " + secs + "с";
+    renderReport(data);
+  } catch (e) {
+    statusEl.textContent = "";
+    resultsEl.innerHTML = '<div class="errbox">Сетевая ошибка: ' + esc(e.message) + "</div>";
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+function renderReport(r) {
+  const vulns = r.vulnerabilities || [];
+  const rows = r.results || [];
+
+  const stats = `
+    <div class="stats">
+      <div class="stat total"><b>${r.total_tests}</b> тестов</div>
+      <div class="stat pass"><b>${r.passed}</b> PASS</div>
+      <div class="stat vuln"><b>${vulns.length}</b> VULNERABILITY</div>
+      <div class="stat err"><b>${(r.errors || 0) + (r.failed || 0)}</b> FAIL/ERROR</div>
+    </div>`;
+
+  const summary = `
+    <div class="summary"><b>summary:</b>\n${esc(r.summary || "")}</div>`;
+
+  const rowsHtml = rows.map((row, i) => {
+    const tc = row.test_case || {};
+    const st = STATUS[row.status] || { text: row.status, cls: "err" };
+    const actual = row.error_message
+      ? esc(row.error_message)
+      : '<span style="color:var(--muted)">' + esc(row.actual_output ?? "∅") + "</span>";
+    return `
+      <tr class="${row.status === "vulnerability" ? "row-vuln" : ""}">
+        <td class="mono">${i + 1}</td>
+        <td><span class="badge ${st.cls}">${st.text}</span></td>
+        <td><pre>${esc(fmtInput(tc.input_data))}</pre></td>
+        <td class="mono">${esc(fmtExpected(tc.expected))}</td>
+        <td>${actual}</td>
+        <td class="mono">${esc(tc.reason || "")}</td>
+      </tr>`;
+  }).join("");
+
+  const table = rows.length ? `
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>вердикт</th><th>вход</th><th>expected</th><th>факт</th><th>почему</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>` : '<p style="color:var(--muted)">нет результатов</p>';
+
+  resultsEl.innerHTML = `
+    <h2 style="margin-top:24px">Отчёт: ${esc(r.function_name || "")}</h2>
+    ${stats}${summary}${table}`;
+}
+
+// стартовый пример
+codeEl.value = EXAMPLES.percentage_bug.code;
+statusEl.textContent = "загружен пример: " + EXAMPLES.percentage_bug.label;
+</script>
+</body>
+</html>

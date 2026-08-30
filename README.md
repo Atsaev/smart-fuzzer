@@ -7,16 +7,27 @@ LLM-powered fuzzer for finding vulnerabilities in Python functions.
 Smart Fuzzer analyzes Python functions using LLM (DeepSeek) to generate intelligent test cases, runs them automatically, and produces a security report with found vulnerabilities and recommendations.
 
 ## Live Demo
-API is available at http://89.125.91.14:8003/docs
+
+- **UI (лаборатория):** https://atsaev-dev.ru/fuzzer/
+- **API docs:** https://atsaev-dev.ru/fuzzer/docs
 
 ## Architecture
-Python function code
-⬇️
-LLM generates test cases    — DeepSeek analyzes the function and creates edge cases
-⬇️
-Runner executes tests       — runs each test case and catches exceptions
-⬇️
-Reporter generates report   — LLM summarizes findings and recommendations
+
+```
+function
+   ↓
+LLM test generation    — DeepSeek: input_data + structured expected + postconditions
+   ↓
+Validator              — drops invalid tests (JSON types, signature mismatch, unjustified exceptions)
+   ↓
+Blind oracle           — recomputes expected from the contract WITHOUT the function body
+   ↓
+Sandbox executor       — RestrictedPython, separate process, resource limits, timeout
+   ↓
+Deterministic comparator — PASS / VULNERABILITY / ERROR (code, not LLM)
+   ↓
+LLM summary            — explains the verdicts, does not decide them
+```
 
 ## Stack
 
