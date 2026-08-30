@@ -1,3 +1,4 @@
+import ast
 import inspect
 import math
 import re
@@ -20,8 +21,23 @@ _EXCEPTION_HINT = re.compile(
 _QUOTED_VALUE_RE = re.compile(r"['\"]([^'\"]*)['\"]")
 _BOOL_VALUE_RE = re.compile(r"\b(True|False|true|false)\b")
 _NUMBER_VALUE_RE = re.compile(r"[-+]?\d+\.?\d*")
+_DICT_VALUE_RE = re.compile(r"\{.*\}", re.DOTALL)
+_EXPECTS_VALUE_RE = re.compile(
+    r"\breturns?\b|\bверн\w*\b|\bвозвращ\w*\b", re.IGNORECASE
+)
+_NON_VALUE_HINTS = ("none", "null", "ничего", "пуст", "empty")
 
 _RETURN_MARKER = "RETURN"
+
+# Исключения, которые функция бросает на некорректных входных данных:
+# их появление там, где ожидался нормальный возврат, — VULNERABILITY.
+# Остальное (NameError, AttributeError, ImportError, OSError и т.п.) —
+# ошибка окружения или самого кода -> ERROR.
+_VULN_EXCEPTIONS = (
+    TypeError, ValueError, KeyError, IndexError, ZeroDivisionError,
+    OverflowError, ArithmeticError, LookupError, UnicodeError,
+    UnicodeDecodeError, UnicodeEncodeError, StopIteration,
+)
 
 
 def _parse_expectation(expected_behavior: str):
@@ -35,8 +51,23 @@ def _parse_expectation(expected_behavior: str):
 def _parse_expected_value(expected_behavior: str):
     """Конкретное ожидаемое значение из текста ожидания или None.
 
-    "returns 'a@b.c'" -> 'a@b.c'; "returns 90" -> 90; "возвращает True" -> True.
+    "returns {'id': 1}" -> dict; "returns 'a@b.c'" -> 'a@b.c';
+    "returns 90" -> 90; "возвращает True" -> True.
+
+    Если текст явно говорит про None/null/пустое значение — оракула нет
+    ("returns null because '1' is not 1" не должно давать ожидание "1").
     """
+    low = expected_behavior.lower()
+    if any(h in low for h in _NON_VALUE_HINTS):
+        return None
+    m = _DICT_VALUE_RE.search(expected_behavior)
+    if m:
+        try:
+            value = ast.literal_eval(m.group(0))
+            if isinstance(value, dict):
+                return value
+        except (ValueError, SyntaxError):
+            pass
     m = _QUOTED_VALUE_RE.search(expected_behavior)
     if m:
         return m.group(1)
@@ -65,7 +96,19 @@ def _values_match(expected, actual):
         )
     if isinstance(expected, str) and isinstance(actual, str):
         return expected.strip() == actual.strip()
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        return expected == actual
+    if isinstance(expected, (list, tuple)) and isinstance(actual, (list, tuple)):
+        return list(expected) == list(actual)
     return None
+
+
+def _expects_non_none(expected_behavior: str) -> bool:
+    """Текст ожидания подразумевает возврат значения, а не None."""
+    low = expected_behavior.lower()
+    if any(h in low for h in _NON_VALUE_HINTS):
+        return False
+    return bool(_EXPECTS_VALUE_RE.search(low))
 
 
 def _classify(test_case: TestCase, exc: BaseException | None, actual_value=None):
@@ -74,12 +117,14 @@ def _classify(test_case: TestCase, exc: BaseException | None, actual_value=None)
     Исключения:
       expected: TypeError, actual: TypeError   -> PASS
       expected: ValueError, actual: TypeError  -> FAIL
-      expected: return,      actual: exception -> VULNERABILITY
-      expected: exception,   actual: return    -> FAIL
+      expected: return, actual: TypeError      -> VULNERABILITY
+      expected: return, actual: NameError      -> ERROR (окружение/код)
+      expected: exception, actual: return      -> FAIL
 
     Возвращаемые значения:
-      expected: 90, actual: 90   -> PASS
-      expected: 90, actual: -900 -> VULNERABILITY (сломана семантика)
+      expected: 90,  actual: 90   -> PASS
+      expected: 90,  actual: -900 -> VULNERABILITY
+      expected: user, actual: None -> VULNERABILITY
     """
     expected = _parse_expectation(test_case.expected_behavior)
 
@@ -88,14 +133,20 @@ def _classify(test_case: TestCase, exc: BaseException | None, actual_value=None)
             return TestStatus.FAILED, False
         expected_value = _parse_expected_value(test_case.expected_behavior)
         if expected_value is not None:
+            if actual_value is None:
+                return TestStatus.VULNERABILITY, True
             match = _values_match(expected_value, actual_value)
             if match is False:
                 return TestStatus.VULNERABILITY, True
+        elif actual_value is None and _expects_non_none(test_case.expected_behavior):
+            return TestStatus.VULNERABILITY, True
         return TestStatus.PASSED, False
 
     actual_name = type(exc).__name__
     if expected == _RETURN_MARKER:
-        return TestStatus.VULNERABILITY, True
+        if isinstance(exc, _VULN_EXCEPTIONS):
+            return TestStatus.VULNERABILITY, True
+        return TestStatus.ERROR, False
     if expected is None or expected.lower() == actual_name.lower():
         return TestStatus.PASSED, False
     return TestStatus.FAILED, False

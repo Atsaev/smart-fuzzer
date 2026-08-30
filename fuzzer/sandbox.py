@@ -42,6 +42,16 @@ ALLOWED_IMPORTS = frozenset({
 })
 
 
+# builtins, которых нет в RestrictedPython 8.5, но нужны для обычного кода
+_SAFE_EXTRA_BUILTINS = {
+    "list": list, "dict": dict, "set": set, "frozenset": frozenset,
+    "min": min, "max": max, "sum": sum, "all": all, "any": any,
+    "enumerate": enumerate, "filter": filter, "map": map,
+    "iter": iter, "next": next, "reversed": reversed,
+    "print": print, "format": format,
+}
+
+
 class SandboxError(Exception):
     """Ошибка песочницы: запрещённая конструкция, таймаут, отказ."""
 
@@ -96,7 +106,9 @@ def _run_worker(func_source, func_name, test_cases, result_queue):
             "_unpack_tuple_": guarded_unpack_sequence,
         })
         namespace["__builtins__"] = {
+            **safe_builtins,
             **namespace["__builtins__"],
+            **_SAFE_EXTRA_BUILTINS,
             "__import__": _guarded_import,
         }
         # доступный пользователю способ импортировать whitelist-модули
