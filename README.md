@@ -81,15 +81,36 @@ def divide(a, b):
 Response:
 ```json
 {
-  "function_name": "divide",
-  "total_tests": 5,
-  "passed": 2,
-  "failed": 1,
-  "errors": 2,
+  "function_name": "safe_divide",
+  "total_tests": 10,
+  "passed": 9,
+  "failed": 0,
+  "errors": 0,
   "vulnerabilities": [...],
-  "summary": "Found 2 vulnerabilities: ZeroDivisionError..."
+  "results": [
+    {
+      "test_case": {
+        "input_data": {"a": 10, "b": 0},
+        "expected": {"type": "exception", "name": "ValueError"}
+      },
+      "status": "passed",
+      "actual_output": null
+    },
+    {
+      "test_case": {
+        "input_data": {"a": 1e308, "b": 1e-308},
+        "expected": {"type": "return", "value": "inf"}
+      },
+      "status": "passed",
+      "actual_output": "inf"
+    }
+  ],
+  "summary": "..."
 }
 ```
+
+Verdicts are decided by a deterministic comparator, not the LLM:
+`PASS`, `VULNERABILITY` (actual result deviates from the contract), `ERROR` (sandbox/environment issue).
 
 ## Security
 
