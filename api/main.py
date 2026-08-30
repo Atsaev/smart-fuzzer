@@ -45,7 +45,7 @@ def fuzzer_test(function_code: str = Body(..., media_type="text/plain")):
     try:
         func_name = _detect_function_name(code)
         test_cases = generate_test_cases(code, func_name)
-        results = run_all_tests_sandboxed(code, test_cases)
+        results = run_all_tests_sandboxed(code, func_name, test_cases)
         return generate_report(func_name, results)
     except SandboxError as e:
         raise HTTPException(status_code=400, detail=str(e))

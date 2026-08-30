@@ -64,7 +64,7 @@ def validate_code(code: str) -> None:
     compile_restricted(code, "<validation>", "exec")
 
 
-def _run_worker(func_source, test_cases, result_queue):
+def _run_worker(func_source, func_name, test_cases, result_queue):
     # лимиты ресурсов - до любого пользовательского кода
     resource.setrlimit(resource.RLIMIT_CPU, (MAX_CPU_SECONDS, MAX_CPU_SECONDS))
     resource.setrlimit(resource.RLIMIT_AS, (MAX_MEMORY_BYTES, MAX_MEMORY_BYTES))
@@ -87,16 +87,9 @@ def _run_worker(func_source, test_cases, result_queue):
         namespace["import_module"] = _guarded_import
         exec(bytecode, namespace)
 
-        func = next(
-            (
-                obj
-                for name, obj in namespace.items()
-                if callable(obj) and not name.startswith("_")
-            ),
-            None,
-        )
-        if func is None:
-            result_queue.put({"error": "Не удалось найти тестируемую функцию"})
+        func = namespace.get(func_name)
+        if not callable(func):
+            result_queue.put({"error": f"Функция {func_name} не найдена"})
             return
 
         results = [run_test(func, TestCase(**tc)) for tc in test_cases]
@@ -107,7 +100,9 @@ def _run_worker(func_source, test_cases, result_queue):
         result_queue.put({"error": f"{type(e).__name__}: {e}"})
 
 
-def run_all_tests_sandboxed(code: str, test_cases: list[TestCase]) -> list[TestResult]:
+def run_all_tests_sandboxed(
+    code: str, func_name: str, test_cases: list[TestCase]
+) -> list[TestResult]:
     """Запускает тест-кейсы в песочнице.
 
     Возвращает результаты или кидает SandboxError.
@@ -116,7 +111,7 @@ def run_all_tests_sandboxed(code: str, test_cases: list[TestCase]) -> list[TestR
     queue = ctx.Queue()
     process = ctx.Process(
         target=_run_worker,
-        args=(code, [tc.model_dump() for tc in test_cases], queue),
+        args=(code, func_name, [tc.model_dump() for tc in test_cases], queue),
     )
     process.start()
 
