@@ -89,7 +89,8 @@ The API executes user code only inside a sandbox: RestrictedPython blocks import
 smart-fuzzer/
 ├── fuzzer/
 │   ├── generator.py    — LLM test case generation
-│   └── runner.py       — test execution engine
+│   ├── runner.py       — test execution engine
+│   └── sandbox.py      — isolated execution of user code
 ├── models/
 │   └── schemas.py      — Pydantic models
 ├── reports/
