@@ -15,6 +15,12 @@ import os
 import resource
 
 from RestrictedPython import compile_restricted, safe_builtins, safe_globals
+from RestrictedPython.Eval import (
+    default_guarded_getattr,
+    default_guarded_getitem,
+    default_guarded_getiter,
+)
+from RestrictedPython.Guards import guarded_unpack_sequence
 
 from fuzzer.runner import run_test
 from models.schemas import TestCase, TestResult
@@ -81,7 +87,18 @@ def _run_worker(func_source, func_name, test_cases, result_queue):
     try:
         bytecode = compile_restricted(func_source, "<sandbox>", "exec")
         namespace = dict(safe_globals)
-        namespace["__builtins__"] = {**safe_builtins, "__import__": _guarded_import}
+        # официальные guard-ы RestrictedPython (в 8.x их нужно задавать явно)
+        namespace.update({
+            "_getattr_": default_guarded_getattr,
+            "_getitem_": default_guarded_getitem,
+            "_getiter_": default_guarded_getiter,
+            "_unpack_sequence_": guarded_unpack_sequence,
+            "_unpack_tuple_": guarded_unpack_sequence,
+        })
+        namespace["__builtins__"] = {
+            **namespace["__builtins__"],
+            "__import__": _guarded_import,
+        }
         # доступный пользователю способ импортировать whitelist-модули
         # (имя __import__ запрещено RestrictedPython как начинающееся с _)
         namespace["import_module"] = _guarded_import
