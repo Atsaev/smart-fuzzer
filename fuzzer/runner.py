@@ -236,7 +236,8 @@ def _outcomes_equal(o1: _Outcome, o2: _Outcome) -> bool:
 def run_test(func, test_case: TestCase) -> TestResult:
     """Выполняет тест дважды: проверяет мутацию входных данных и
     стабильность результата при одинаковом входе."""
-    args, kwargs = _build_call(func, test_case.input_data)
+    # deepcopy входных данных: функция не должна мутировать объекты теста
+    args, kwargs = _build_call(func, copy.deepcopy(test_case.input_data))
     inputs_snapshot = copy.deepcopy((args, kwargs))
 
     first = _invoke(func, args, kwargs)
