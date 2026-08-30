@@ -148,6 +148,7 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
 - Только JSON типы: string, number, boolean, null, array, object
 - Списки пиши литерально: [1, 2, 3] — НЕ [0] * 100, максимум 5 элементов
 - Никаких Python-выражений внутри JSON: умножение строк ("a" * 100), list comprehension и вызовы функций запрещены — только константные значения
+- Если функция возвращает значение, укажи ТОЧНОЕ ожидаемое значение: для чисел — число ("returns 90.0"), для строк — строку в кавычках ("returns 'user@example.com'"). Не пиши абстрактно "returns calculated discount"
 
 Категории тест-кейсов:
 - boundary: граничные значения (0, -1, пустая строка, пустой список)
