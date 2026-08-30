@@ -20,7 +20,7 @@ from RestrictedPython.Eval import (
     default_guarded_getitem,
     default_guarded_getiter,
 )
-from RestrictedPython.Guards import guarded_unpack_sequence
+from RestrictedPython.Guards import full_write_guard, guarded_unpack_sequence
 
 from fuzzer.runner import run_test
 from models.schemas import TestCase, TestResult, TestStatus
@@ -86,6 +86,7 @@ def _sandbox_namespace() -> dict:
         "_getiter_": default_guarded_getiter,
         "_unpack_sequence_": guarded_unpack_sequence,
         "_unpack_tuple_": guarded_unpack_sequence,
+        "_write_": full_write_guard,
     })
     namespace["__builtins__"] = {
         **safe_builtins,

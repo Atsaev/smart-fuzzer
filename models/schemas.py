@@ -18,17 +18,34 @@ class Expected(BaseModel):
     name: str | None = None  # для type="exception"; None = любое исключение
 
 
+class Postconditions(BaseModel):
+    """Пост-условия на входные данные после вызова."""
+    inputs_unchanged: bool | None = None  # функция НЕ должна менять входы
+    input_data: dict | None = None        # ожидаемое состояние входов по именам параметров
+
+
 class TestCase(BaseModel):
-    input_data: dict
-    expected: Expected
+    input_data: dict | list = {}   # dict — один вызов; list[dict] — последовательность
+    expected: Expected | list[Expected]
     category: str = ""
     reason: str = ""
+    postconditions: Postconditions | None = None
+
+    @property
+    def is_sequence(self) -> bool:
+        return isinstance(self.expected, list)
 
     @property
     def expected_behavior(self) -> str:
-        if self.expected.type == "exception":
-            return f"raises {self.expected.name}" if self.expected.name else "raises exception"
-        return f"returns {self.expected.value!r}"
+        if isinstance(self.expected, list):
+            return " | ".join(
+                f"{e.type}:{e.name if e.type == 'exception' else e.value!r}"
+                for e in self.expected
+            )
+        e = self.expected
+        if e.type == "exception":
+            return f"raises {e.name}" if e.name else "raises exception"
+        return f"returns {e.value!r}"
 
 
 class TestResult(BaseModel):

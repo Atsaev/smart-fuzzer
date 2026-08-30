@@ -2,10 +2,10 @@
 структурированного ожидания (TestCase.expected) и фактического результата.
 LLM не участвует в принятии решения."""
 
+import ast
 import copy
 import inspect
 import math
-import re
 from dataclasses import dataclass
 
 from models.schemas import Expected, TestCase, TestResult, TestStatus
@@ -51,45 +51,43 @@ def _values_match(expected, actual):
 def _classify(expected: Expected, exc: BaseException | None, actual_value):
     """Чисто детерминированный вердикт по (контракт, фактический результат)."""
     if exc is None:
-        # функция вернула значение
         if expected.type == "exception":
-            return TestStatus.VULNERABILITY, True  # ждали исключение — вернулась
+            return TestStatus.VULNERABILITY, True
         if expected.value is None:
             if actual_value is None:
                 return TestStatus.PASSED, False
-            return TestStatus.VULNERABILITY, True  # ждали None — вернулось значение
+            return TestStatus.VULNERABILITY, True
         if actual_value is None:
-            return TestStatus.VULNERABILITY, True  # ждали значение — вернулся None
+            return TestStatus.VULNERABILITY, True
         if _values_match(expected.value, actual_value) is False:
-            return TestStatus.VULNERABILITY, True  # неверное значение
+            return TestStatus.VULNERABILITY, True
         return TestStatus.PASSED, False
 
-    # функция бросила исключение
     if expected.type == "return":
         if isinstance(exc, _VULN_EXCEPTIONS):
             return TestStatus.VULNERABILITY, True
         return TestStatus.ERROR, False
 
     if expected.name is None:
-        return TestStatus.PASSED, False  # ждали любое исключение
+        return TestStatus.PASSED, False
     if expected.name.lower() == type(exc).__name__.lower():
         return TestStatus.PASSED, False
-    return TestStatus.VULNERABILITY, True  # другой тип исключения
+    return TestStatus.VULNERABILITY, True
 
 
 def _check_return_annotation(func_source: str, actual_value) -> str | None:
     """Детерминированная проверка: фактический тип результата против
     аннотации возврата (-> int / -> float / ...). Не зависит от LLM."""
     try:
-        tree = ast_parse(func_source)
+        tree = ast.parse(func_source)
     except SyntaxError:
         return None
     for node in tree.body:
-        if isinstance(node, ast_FunctionDef):
+        if isinstance(node, ast.FunctionDef):
             returns = node.returns
             if returns is None:
                 return None
-            name = returns.id if isinstance(returns, ast_Name) else None
+            name = returns.id if isinstance(returns, ast.Name) else None
             if name in _ANNOTATION_TYPES and actual_value is not None:
                 if not isinstance(actual_value, _ANNOTATION_TYPES[name]):
                     return (
@@ -98,13 +96,6 @@ def _check_return_annotation(func_source: str, actual_value) -> str | None:
                     )
             return None
     return None
-
-
-# алиасы, чтобы не плодить импорты выше
-import ast as _ast
-ast_parse = _ast.parse
-ast_FunctionDef = _ast.FunctionDef
-ast_Name = _ast.Name
 
 
 @dataclass
@@ -183,23 +174,20 @@ def _build_call(func, input_data):
     return (input_data,), {}
 
 
-def run_test(func, test_case: TestCase, func_source: str | None = None) -> TestResult:
-    """Выполняет тест дважды: проверяет мутацию входных данных и
-    стабильность результата при одинаковом входе.
-
-    Детерминированные проверки (не зависят от LLM):
-    - вердикт по структурированному ожиданию;
-    - соответствие аннотации возврата;
-    - мутация входных данных;
-    - стабильность результата.
-    """
-    args, kwargs = _build_call(func, copy.deepcopy(test_case.input_data))
-    inputs_snapshot = copy.deepcopy((args, kwargs))
-
+def _run_single(func, test_case: TestCase, func_source: str | None) -> TestResult:
+    """Одиночный вызов: вердикт + аннотация + пост-условия + стабильность."""
+    call_input = copy.deepcopy(test_case.input_data)
+    args, kwargs = _build_call(func, call_input)
     first = _invoke(func, args, kwargs)
-    second = _invoke(func, args, kwargs)
 
-    mutated = (args, kwargs) != inputs_snapshot
+    # свежий вход для второго вызова: мутация не должна влиять на проверку
+    # стабильности, а результат копируем, чтобы общий объект не портил сравнение
+    args2, kwargs2 = _build_call(func, copy.deepcopy(test_case.input_data))
+    second = _invoke(func, args2, kwargs2)
+    first = _Outcome(value=copy.deepcopy(first.value), exc=first.exc)
+    second = _Outcome(value=copy.deepcopy(second.value), exc=second.exc)
+
+    mutated = call_input != test_case.input_data
     unstable = not _outcomes_equal(first, second)
 
     status, is_vuln = _classify(test_case.expected, first.exc, first.value)
@@ -209,36 +197,100 @@ def run_test(func, test_case: TestCase, func_source: str | None = None) -> TestR
             ann_error = _check_return_annotation(func_source, first.value)
             if ann_error:
                 return TestResult(
-                    test_case=test_case,
-                    status=TestStatus.VULNERABILITY,
+                    test_case=test_case, status=TestStatus.VULNERABILITY,
                     actual_output=str(first.value) if first.exc is None else None,
-                    error_message=ann_error,
+                    error_message=ann_error, is_vulnerability=True,
+                )
+
+        pc = test_case.postconditions
+        if pc is not None:
+            if pc.inputs_unchanged is True and mutated:
+                return TestResult(
+                    test_case=test_case, status=TestStatus.VULNERABILITY,
+                    actual_output=str(first.value) if first.exc is None else None,
+                    error_message="нарушение inputs_unchanged: входные данные были изменены функцией",
                     is_vulnerability=True,
                 )
+            if pc.input_data:
+                for key, expected_val in pc.input_data.items():
+                    actual_val = call_input.get(key)
+                    if _values_match(expected_val, actual_val) is False:
+                        return TestResult(
+                            test_case=test_case, status=TestStatus.VULNERABILITY,
+                            actual_output=str(first.value) if first.exc is None else None,
+                            error_message=(
+                                f"пост-условие не выполнено: {key} должен быть "
+                                f"{expected_val!r}, фактически {actual_val!r}"
+                            ),
+                            is_vulnerability=True,
+                        )
+        else:
+            if mutated:
+                return TestResult(
+                    test_case=test_case, status=TestStatus.VULNERABILITY,
+                    actual_output=str(first.value) if first.exc is None else None,
+                    error_message="входные данные были изменены функцией",
+                    is_vulnerability=True,
+                )
+
         if unstable:
             return TestResult(
-                test_case=test_case,
-                status=TestStatus.VULNERABILITY,
+                test_case=test_case, status=TestStatus.VULNERABILITY,
                 actual_output=str(first.value) if first.exc is None else None,
                 error_message="нестабильное поведение: разные результаты при одинаковом входе",
                 is_vulnerability=True,
             )
-        if mutated:
+
+    return TestResult(
+        test_case=test_case, status=status,
+        actual_output=str(first.value) if first.exc is None else None,
+        error_message=first.error_message, is_vulnerability=is_vuln,
+    )
+
+
+def _run_sequence(func, test_case: TestCase) -> TestResult:
+    """Последовательность вызовов в одном процессе: ловит утечки состояния.
+
+    Состояние между вызовами сохраняется; каждый вызов сверяется со своим
+    ожиданием. Отклонение на любом шаге — VULNERABILITY.
+    """
+    inputs = test_case.input_data
+    expected = test_case.expected
+
+    if len(inputs) != len(expected):
+        return TestResult(
+            test_case=test_case, status=TestStatus.ERROR,
+            error_message="число вызовов и ожиданий не совпадает",
+            is_vulnerability=False,
+        )
+
+    outcomes = []
+    for inp in inputs:
+        args, kwargs = _build_call(func, copy.deepcopy(inp))
+        outcomes.append(_invoke(func, args, kwargs))
+
+    for i, (outcome, exp) in enumerate(zip(outcomes, expected)):
+        status, is_vuln = _classify(exp, outcome.exc, outcome.value)
+        if status != TestStatus.PASSED:
+            detail = outcome.error_message or "неверное значение"
             return TestResult(
-                test_case=test_case,
-                status=TestStatus.VULNERABILITY,
-                actual_output=str(first.value) if first.exc is None else None,
-                error_message="входные данные были изменены функцией",
-                is_vulnerability=True,
+                test_case=test_case, status=status,
+                actual_output=str(outcome.value) if outcome.exc is None else None,
+                error_message=f"вызов {i + 1}: {detail}",
+                is_vulnerability=is_vuln,
             )
 
     return TestResult(
-        test_case=test_case,
-        status=status,
-        actual_output=str(first.value) if first.exc is None else None,
-        error_message=first.error_message,
-        is_vulnerability=is_vuln,
+        test_case=test_case, status=TestStatus.PASSED,
+        actual_output=str(outcomes[-1].value) if outcomes else None,
+        is_vulnerability=False,
     )
+
+
+def run_test(func, test_case: TestCase, func_source: str | None = None) -> TestResult:
+    if test_case.is_sequence:
+        return _run_sequence(func, test_case)
+    return _run_single(func, test_case, func_source)
 
 
 def run_all_tests(func, test_cases: list[TestCase]) -> list[TestResult]:
