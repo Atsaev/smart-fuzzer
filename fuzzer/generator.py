@@ -36,7 +36,7 @@ def normalize_json(text: str) -> str:
 # литерал в выражении: строка в двойных/одинарных кавычках или список
 _LITERAL = r"(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|\[[^\[\]]*\])"
 
-# выражение вида "a" * 250 + "@b.c" или [0] * 4 (повтор + конкатенации)
+# выражение вида "a" * 250 + "@b.c" или [0] * 4 (повтор + опциональные конкатенации)
 _EXPR_RE = re.compile(
     _LITERAL
     + r"\s*\*\s*\d+"
@@ -81,8 +81,8 @@ def expand_python_exprs(text: str) -> str:
     """Разворачивает Python-выражения LLM в JSON-значениях безопасно.
 
     LLM часто игнорирует требование валидного JSON и генерирует в
-    значениях "a" * 250 + "@b.c" или [0] * 4. Такие фрагменты
-    вычисляются и заменяются на валидный JSON.
+    значениях "a" * 250 + "@b.c", "a".repeat(255) или [0] * 4.
+    Такие фрагменты вычисляются и заменяются на валидный JSON.
     """
 
     def repl(match):
@@ -127,52 +127,65 @@ def repair_json(client, broken_json: str) -> str:
         model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=4000,
+        max_tokens=8000,
     )
     return response.choices[0].message.content.strip()
 
 
-def generate_test_cases(function_code: str, function_name: str) -> list[TestCase]:
-    print(f"-> Генерация тест-кейсов для: {function_name}")
-    client = get_client()
-
-    prompt = f"""Ты генератор тест-кейсов для фаззинга. Проанализируй функцию и сгенерируй 10 тест-кейсов.
+def _build_prompt(function_code: str) -> str:
+    return f"""Ты генератор fuzz-тестов для поиска ошибок и уязвимостей в Python-функции. Проанализируй переданную функцию и сгенерируй 10 тест-кейсов. НЕ изменяй исходную функцию — только генерируй тесты и их ожидаемое поведение.
 
 Функция:
 ```python
 {function_code}
 ```
 
-Правила (СТРОГО):
-- Отвечай ТОЛЬКО валидным JSON массивом, без markdown, без пояснений
-- Только JSON типы: string, number, boolean, null, array, object
-- Списки пиши литерально: [1, 2, 3] — НЕ [0] * 100, максимум 5 элементов
-- Никаких Python-выражений внутри JSON: умножение строк ("a" * 100), list comprehension и вызовы функций запрещены — только константные значения
-- Если функция возвращает значение, укажи ТОЧНОЕ ожидаемое значение: для чисел — число ("returns 90.0"), для строк — строку в кавычках ("returns 'user@example.com'"). Не пиши абстрактно "returns calculated discount"
+Проверяй как можно больше категорий из списка:
+- граничные значения; значения за пределами допустимых; нулевые и отрицательные; минимальные и максимальные допустимые; очень большие значения;
+- пустые значения; None; неверные типы данных; пустые и большие коллекции; дубликаты;
+- строки с пробелами; Unicode и специальные символы; некорректные форматы; неполные и лишние данные;
+- минимальная и максимальная длина; off-by-one;
+- ошибки нормализации и преобразования типов; неверные вычисления; нарушение инвариантов;
+- NaN и Infinity, если применимо; переполнение; деление на ноль;
+- комбинации нескольких пограничных условий; изменение входных данных; повторные вызовы с одним и тем же входом; утечки состояния между вызовами.
 
-Категории тест-кейсов:
-- boundary: граничные значения (0, -1, пустая строка, пустой список)
-- invalid: неверные типы (null вместо списка, число вместо строки)
-- special: специфичные для данной функции случаи
+Для каждого теста укажи:
+1. "input_data" — конкретные входные данные (только JSON-типы: string, number, boolean, null, array, object).
+2. "expected_behavior" — ОЖИДАЕМЫЙ результат: для возвращаемого значения — КОНКРЕТНОЕ значение ("returns 90.0", "returns 'user@example.com'"); для исключения — тип ("raises ValueError"). Без абстракций вроде "returns calculated discount".
+3. "category" — boundary, invalid, special, overflow, edge_combination.
+4. "reason" — короткое пояснение, почему тест важен.
+
+Правила:
+- Если функция по смыслу должна бросить исключение на данных — ожидай его явно ("raises TypeError"). Это НЕ ошибка функции.
+- Ожидаемое исключение должно совпадать с тем, что функция обязана бросить по контракту.
+- Не придумывай уязвимости там, где поведение соответствует контракту.
+- Только константные значения — никаких Python-выражений: без "a" * 100, без "a".repeat(255), без list comprehension, без вызовов функций.
+- Отвечай ТОЛЬКО валидным JSON массивом, без markdown, без пояснений.
 
 Формат ответа:
 [
   {{
     "input_data": {{"param_name": value}},
-    "expected_behavior": "что должно произойти",
-    "category": "boundary"
+    "expected_behavior": "returns 90.0",
+    "category": "boundary",
+    "reason": "почему важен"
   }}
 ]"""
 
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=4000,
-    )
-    raw_content = response.choices[0].message.content
-    print("-> RAW ответ (первые 300 символов):")
-    print(raw_content[:300])
+
+def generate_test_cases(function_code: str, function_name: str) -> list[TestCase]:
+    print(f"-> Генерация тест-кейсов для: {function_name}")
+    client = get_client()
+    prompt = _build_prompt(function_code)
+
+    def call_llm() -> str:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=8000,
+        )
+        return response.choices[0].message.content
 
     def try_parse(text: str) -> list | None:
         try:
@@ -184,6 +197,10 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
             print(f"-> Парсинг не удался: {e}")
             return None
 
+    raw_content = call_llm()
+    print("-> RAW ответ (первые 300 символов):")
+    print(raw_content[:300])
+
     # Попытка 1: прямой парсинг
     result = try_parse(raw_content)
 
@@ -192,8 +209,6 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
         print("-> Запускаем repair через LLM...")
         try:
             repaired = repair_json(client, raw_content)
-            print("-> Репейр-ответ (первые 200 символов):")
-            print(repaired[:200])
             result = try_parse(repaired)
         except Exception as e:
             print(f"-> Repair также не помог: {e}")
@@ -202,13 +217,7 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
     if result is None:
         print("-> Вторая попытка генерации...")
         try:
-            response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=4000,
-            )
-            result = try_parse(response.choices[0].message.content)
+            result = try_parse(call_llm())
         except Exception as e:
             print(f"-> Вторая попытка не удалась: {e}")
 

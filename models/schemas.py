@@ -14,6 +14,7 @@ class TestCase(BaseModel):
     input_data: dict
     expected_behavior: str
     category: str
+    reason: str = ""
 
 
 class TestResult(BaseModel):

@@ -26,7 +26,8 @@ def generate_report(function_name: str, results: list[TestResult]) -> FuzzReport
         actual = r.error_message or str(r.actual_output)
         lines.append(
             f"{i}. [{r.status.value}] input={r.test_case.input_data} "
-            f"expected={r.test_case.expected_behavior!r} actual={actual!r}"
+            f"expected={r.test_case.expected_behavior!r} actual={actual!r} "
+            f"reason={r.test_case.reason!r}"
         )
     details = "\n".join(lines)
 
@@ -36,7 +37,7 @@ def generate_report(function_name: str, results: list[TestResult]) -> FuzzReport
 - PASS — поведение совпало с ожидаемым
 - FAIL — поведение отличается от ожидаемого
 - ERROR — не удалось классифицировать
-- VULNERABILITY — функция упала там, где ожидался нормальный возврат, или вернула значение, отличное от ожидаемого (включая неверные вычисления)
+- VULNERABILITY — функция вернула неверное значение, упала там, где ожидался возврат, вернула значение там, где ожидалось исключение, или бросила исключение другого типа, чем ожидалось
 
 Результаты тестов:
 {details}

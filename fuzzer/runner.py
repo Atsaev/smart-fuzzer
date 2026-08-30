@@ -130,7 +130,7 @@ def _classify(test_case: TestCase, exc: BaseException | None, actual_value=None)
 
     if exc is None:
         if expected != _RETURN_MARKER:
-            return TestStatus.FAILED, False
+            return TestStatus.VULNERABILITY, True
         expected_value = _parse_expected_value(test_case.expected_behavior)
         if expected_value is not None:
             if actual_value is None:
@@ -147,9 +147,12 @@ def _classify(test_case: TestCase, exc: BaseException | None, actual_value=None)
         if isinstance(exc, _VULN_EXCEPTIONS):
             return TestStatus.VULNERABILITY, True
         return TestStatus.ERROR, False
-    if expected is None or expected.lower() == actual_name.lower():
+    if expected is None:
         return TestStatus.PASSED, False
-    return TestStatus.FAILED, False
+    if expected.lower() == actual_name.lower():
+        return TestStatus.PASSED, False
+    # ожидали исключение другого типа
+    return TestStatus.VULNERABILITY, True
 
 
 def _build_call(func, input_data):
