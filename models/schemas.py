@@ -7,6 +7,7 @@ class TestStatus(str, Enum):
     PASSED = "passed"
     FAILED = "failed"
     ERROR = "error"
+    VULNERABILITY = "vulnerability"
 
 
 class TestCase(BaseModel):

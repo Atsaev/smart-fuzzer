@@ -1,6 +1,59 @@
 import inspect
+import re
 
 from models.schemas import TestCase, TestResult, TestStatus
+
+_EXCEPTION_RE = re.compile(
+    r"\b(TypeError|ValueError|KeyError|IndexError|ZeroDivisionError|"
+    r"AttributeError|OverflowError|RuntimeError|StopIteration|AssertionError|"
+    r"ImportError|NameError|OSError|PermissionError|TimeoutError|"
+    r"FileNotFoundError|UnicodeDecodeError|UnicodeEncodeError|UnicodeError|"
+    r"RecursionError|MemoryError|ArithmeticError|LookupError|EOFError|"
+    r"NotImplementedError|SyntaxError|IndentationError|TabError)\b",
+    re.IGNORECASE,
+)
+_EXCEPTION_HINT = re.compile(
+    r"\braise\b|\bexception\b|\bбросает\b|\bошибк\b", re.IGNORECASE
+)
+
+_RETURN_MARKER = "RETURN"
+
+
+def _parse_expectation(expected_behavior: str):
+    """Что ждёт тест: исключение (какого типа) или возврат значения.
+
+    Возвращает:
+      "RETURN"               — ожидается нормальный возврат
+      "TypeError" и т.п.     — ожидается конкретное исключение
+      None                   — ожидается любое исключение
+    """
+    m = _EXCEPTION_RE.search(expected_behavior)
+    if m or _EXCEPTION_HINT.search(expected_behavior):
+        return m.group(0) if m else None
+    return _RETURN_MARKER
+
+
+def _classify(test_case: TestCase, exc: BaseException | None):
+    """Строгая классификация результата теста.
+
+    expected: TypeError, actual: TypeError   -> PASS
+    expected: ValueError, actual: TypeError  -> FAIL
+    expected: return,      actual: exception -> VULNERABILITY
+    expected: exception,   actual: return    -> FAIL
+    """
+    expected = _parse_expectation(test_case.expected_behavior)
+
+    if exc is None:
+        if expected == _RETURN_MARKER:
+            return TestStatus.PASSED, False
+        return TestStatus.FAILED, False
+
+    actual_name = type(exc).__name__
+    if expected == _RETURN_MARKER:
+        return TestStatus.VULNERABILITY, True
+    if expected is None or expected.lower() == actual_name.lower():
+        return TestStatus.PASSED, False
+    return TestStatus.FAILED, False
 
 
 def _build_call(func, input_data):
@@ -46,36 +99,23 @@ def _build_call(func, input_data):
 
 
 def run_test(func, test_case: TestCase) -> TestResult:
+    args, kwargs = _build_call(func, test_case.input_data)
     try:
-        args, kwargs = _build_call(func, test_case.input_data)
         result = func(*args, **kwargs)
-
-        is_vulnerability = (
-            result is None and "None" not in test_case.expected_behavior
-        )
-
+        status, is_vuln = _classify(test_case, None)
         return TestResult(
             test_case=test_case,
-            status=TestStatus.PASSED,
+            status=status,
             actual_output=str(result),
-            is_vulnerability=is_vulnerability,
+            is_vulnerability=is_vuln,
         )
-
-    except (ValueError, KeyError) as e:
-        is_vulnerability = isinstance(e, KeyError)
-        return TestResult(
-            test_case=test_case,
-            status=TestStatus.FAILED,
-            error_message=f"{type(e).__name__}: {str(e)}",
-            is_vulnerability=is_vulnerability,
-        )
-
     except Exception as e:
+        status, is_vuln = _classify(test_case, e)
         return TestResult(
             test_case=test_case,
-            status=TestStatus.ERROR,
-            error_message=f"{type(e).__name__}: {str(e)}",
-            is_vulnerability=True,
+            status=status,
+            error_message=f"{type(e).__name__}: {e}",
+            is_vulnerability=is_vuln,
         )
 
 
