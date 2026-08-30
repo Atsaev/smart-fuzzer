@@ -70,6 +70,7 @@ class FuzzReport(BaseModel):
     failed: int
     errors: int
     vulnerabilities: list[TestResult]
+    results: list[TestResult] = []  # все результаты: input + expected + actual + status
     summary: str
 
 

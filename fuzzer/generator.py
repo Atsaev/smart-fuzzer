@@ -6,7 +6,7 @@ import re
 import json5
 from openai import OpenAI
 
-from models.schemas import TestCase
+from models.schemas import Expected, TestCase
 
 
 def get_client():
@@ -180,6 +180,7 @@ def _build_prompt(function_code: str) -> str:
   4) неправильные типы;
   5) edge cases;
   6) остальные категории (NaN, переполнение, деление на ноль и т.п.), если применимы.
+- Для арифметических функций ОБЯЗАТЕЛЬНО включи минимум 3 теста с простыми круглыми значениями, где ожидаемый результат можно вычислить вручную (например, percentage(25, 100) -> value: 25.0). Рассчитывай ожидание независимо от тела функции — по смыслу операции.
 - Каждый из 10 тестов должен проверять ОТДЕЛЬНОЕ поведение. НЕ создавай несколько тестов, отличающихся только значением, если они проверяют одно и то же свойство. Предпочитай тесты, которые могут обнаружить разные классы ошибок.
 - НЕ добавляй тест только ради покрытия категории (например, NaN на функции, где он неинтересен).
 - Полезные категории: граничные значения; за пределами допустимых; нулевые/отрицательные; min/max; очень большие; пустые; None; неверные типы; пустые/большие коллекции; дубликаты; пробелы; Unicode; некорректные форматы; неполные/лишние данные; min/max длина; off-by-one; ошибки нормализации/преобразования типов; неверные вычисления; нарушение инвариантов; NaN/Infinity; переполнение; деление на ноль; комбинации условий; изменение входных данных; повторные вызовы; утечки состояния.
@@ -216,6 +217,115 @@ def _build_prompt(function_code: str) -> str:
     "reason": "повторный вызов с тем же входом: утечка состояния"
   }}
 ]"""
+
+
+def _extract_signature(code: str) -> str:
+    """Сигнатура функции без тела — oracle не должен видеть реализацию.
+
+    Собираем срезом исходника от `def` до начала тела: ast.unparse на
+    Python 3.14 падает на искусственных узлах без lineno/col_offset.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return ""
+    lines = code.splitlines()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.body:
+            start_pos = (node.lineno - 1, node.col_offset)
+            first_stmt = node.body[0]
+            end_pos = (first_stmt.lineno - 1, first_stmt.col_offset)
+            if start_pos[0] == end_pos[0]:
+                header = lines[start_pos[0]][start_pos[1]:end_pos[1]].rstrip()
+            else:
+                parts = [lines[start_pos[0]][start_pos[1]:]]
+                parts.extend(lines[start_pos[0] + 1:end_pos[0]])
+                header = "\n".join(parts).rstrip()
+            if header.endswith(":"):
+                header = header[:-1].rstrip()
+            return header
+    return ""
+
+
+def _extract_raises(code: str) -> list[str]:
+    """Имена исключений из явных raise в теле функции."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if isinstance(exc, ast.Name):
+                names.add(exc.id)
+    return sorted(names)
+
+
+def _refine_expectations(client, code: str, cases: list[TestCase]) -> list[TestCase]:
+    """Независимый oracle: пересчитывает expected по сигнатуре и контракту,
+    НЕ видя тело функции (исключения из валидаций передаются как подсказка)."""
+    signature = _extract_signature(code)
+    if not signature:
+        return cases
+    raises = _extract_raises(code)
+    inputs = json.dumps([c.input_data for c in cases], ensure_ascii=False)
+
+    prompt = f"""Ты независимый oracle для fuzz-тестов. Вычисли ОЖИДАЕМОЕ поведение функции по её КОНТРАКТУ, НЕ видя тело функции.
+
+Сигнатура функции:
+{signature}
+
+Функция может бросать исключения (из явных проверок): {raises if raises else "нет явных проверок"}
+
+Входы тест-кейсов (в том же порядке):
+{inputs}
+
+Для КАЖДОГО входа вычисли expected по смыслу контракта:
+- возвращается значение: {{"type": "return", "value": <точное значение>}}
+- вход некорректен по контракту: {{"type": "exception", "name": "<тип исключения>"}}
+- контракт для входа неоднозначен: {{"type": "return", "value": null}}
+
+Пример: percentage(25, 100) -> {{"type": "return", "value": 25.0}}
+
+Верни ТОЛЬКО JSON массив с ожиданиями в том же порядке, без пояснений:
+[
+  {{"type": "return", "value": 25.0}},
+  {{"type": "exception", "name": "TypeError"}}
+]"""
+
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=8000,
+        )
+        raw = response.choices[0].message.content
+        print("-> ORACLE RAW:", raw[:400])
+        content = extract_json(raw)
+        content = normalize_json(content)
+        content = expand_python_exprs(content)
+        parsed = parse_json(content)
+    except Exception as e:
+        print(f"-> Oracle не смог распарсить: {e}")
+        return cases
+
+    if len(parsed) != len(cases):
+        print(f"-> Oracle: ожиданий {len(parsed)} != тестов {len(cases)}, оставляем draft")
+        return cases
+
+    refined = []
+    for case, exp_item in zip(cases, parsed):
+        if not isinstance(exp_item, dict):
+            refined.append(case)
+            continue
+        try:
+            refined.append(case.model_copy(update={"expected": Expected(**exp_item)}))
+        except Exception as e:
+            print(f"-> Oracle: невалидное ожидание {exp_item}: {e}")
+            refined.append(case)
+    return refined
 
 
 def generate_test_cases(function_code: str, function_name: str) -> list[TestCase]:
@@ -285,4 +395,5 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
             f"Сырой ответ:\n{raw_content}"
         )
 
-    return result
+    # независимый oracle: пересчитывает ожидания без тела функции
+    return _refine_expectations(client, function_code, result)

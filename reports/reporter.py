@@ -64,5 +64,6 @@ def generate_report(function_name: str, results: list[TestResult]) -> FuzzReport
         failed=failed,
         errors=errors,
         vulnerabilities=vulnerabilities,
+        results=results,
         summary=summary,
     )
