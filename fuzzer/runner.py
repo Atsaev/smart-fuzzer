@@ -1,7 +1,9 @@
 import ast
+import copy
 import inspect
 import math
 import re
+from dataclasses import dataclass
 
 from models.schemas import TestCase, TestResult, TestStatus
 
@@ -193,25 +195,82 @@ def _build_call(func, input_data):
     return (input_data,), {}
 
 
-def run_test(func, test_case: TestCase) -> TestResult:
-    args, kwargs = _build_call(func, test_case.input_data)
+@dataclass
+class _Outcome:
+    value: object = None
+    exc: BaseException | None = None
+
+    @property
+    def error_message(self) -> str | None:
+        if self.exc is None:
+            return None
+        return f"{type(self.exc).__name__}: {self.exc}"
+
+
+def _invoke(func, args, kwargs) -> _Outcome:
     try:
-        result = func(*args, **kwargs)
-        status, is_vuln = _classify(test_case, None, result)
-        return TestResult(
-            test_case=test_case,
-            status=status,
-            actual_output=str(result),
-            is_vulnerability=is_vuln,
-        )
+        return _Outcome(value=func(*args, **kwargs))
     except Exception as e:
-        status, is_vuln = _classify(test_case, e)
+        return _Outcome(exc=e)
+
+
+def _values_equal(a, b) -> bool:
+    try:
+        if isinstance(a, float) and isinstance(b, float):
+            if math.isnan(a) and math.isnan(b):
+                return True
+            return a == b or math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+        return a == b
+    except Exception:
+        return True
+
+
+def _outcomes_equal(o1: _Outcome, o2: _Outcome) -> bool:
+    if (o1.exc is None) != (o2.exc is None):
+        return False
+    if o1.exc is not None:
+        return type(o1.exc) is type(o2.exc)
+    return _values_equal(o1.value, o2.value)
+
+
+def run_test(func, test_case: TestCase) -> TestResult:
+    """Выполняет тест дважды: проверяет мутацию входных данных и
+    стабильность результата при одинаковом входе."""
+    args, kwargs = _build_call(func, test_case.input_data)
+    inputs_snapshot = copy.deepcopy((args, kwargs))
+
+    first = _invoke(func, args, kwargs)
+    second = _invoke(func, args, kwargs)
+
+    mutated = (args, kwargs) != inputs_snapshot
+    unstable = not _outcomes_equal(first, second)
+
+    status, is_vuln = _classify(test_case, first.exc, first.value)
+
+    if status == TestStatus.PASSED and unstable:
         return TestResult(
             test_case=test_case,
-            status=status,
-            error_message=f"{type(e).__name__}: {e}",
-            is_vulnerability=is_vuln,
+            status=TestStatus.VULNERABILITY,
+            actual_output=str(first.value) if first.exc is None else None,
+            error_message="нестабильное поведение: разные результаты при одинаковом входе",
+            is_vulnerability=True,
         )
+    if status == TestStatus.PASSED and mutated:
+        return TestResult(
+            test_case=test_case,
+            status=TestStatus.VULNERABILITY,
+            actual_output=str(first.value) if first.exc is None else None,
+            error_message="входные данные были изменены функцией",
+            is_vulnerability=True,
+        )
+
+    return TestResult(
+        test_case=test_case,
+        status=status,
+        actual_output=str(first.value) if first.exc is None else None,
+        error_message=first.error_message,
+        is_vulnerability=is_vuln,
+    )
 
 
 def run_all_tests(func, test_cases: list[TestCase]) -> list[TestResult]:
