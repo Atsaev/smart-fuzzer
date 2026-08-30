@@ -154,6 +154,8 @@ def _build_prompt(function_code: str) -> str:
 - expected ВСЕГДА должен содержать конкретное проверяемое значение или конкретный тип исключения. ЗАПРЕЩЕНО: "примерно", "возможно", "ожидается ошибка", "корректное значение" и любые другие неопределённые ожидания.
 - Если контракт невозможно однозначно определить из кода, имени, сигнатуры и очевидной семантики — НЕ придумывай поведение. Используй тест только там, где ожидаемое поведение однозначно.
 - Ожидай исключение ТОЛЬКО если оно следует из контракта или явной валидации функции. Если функция по контракту должна бросить TypeError и бросает TypeError — expected: {{"type": "exception", "name": "TypeError"}}. Сам факт возникновения исключения — НЕ уязвимость.
+- expected ОБЯЗАН соответствовать reason этого тест-кейса: reason описывает возврат значения — expected.type="return"; reason описывает исключение — expected.type="exception". Противоречие reason и expected недопустимо.
+- Если функция ЯВНО определяет поведение для конкретного входа (например, `if not items: return None`, `if not isinstance(items, list): raise TypeError`) — НЕ объявляй это поведение ошибкой. expected должен соответствовать явному поведению функции для этого входа.
 - Для функций со строками обязательно включай тесты с внутренними пробелами ("John Doe"), краевыми пробелами, регистром.
 - Для функций с диапазонами (clamp и т.п.) обязательно включай value ниже минимума и выше максимума с конкретными ожиданиями.
 
@@ -321,10 +323,21 @@ def _refine_expectations(client, code: str, cases: list[TestCase]) -> list[TestC
             refined.append(case)
             continue
         try:
-            refined.append(case.model_copy(update={"expected": Expected(**exp_item)}))
+            exp = Expected(**exp_item)
         except Exception as e:
             print(f"-> Oracle: невалидное ожидание {exp_item}: {e}")
             refined.append(case)
+            continue
+        # draft видел тело: его expected отражает явное поведение функции
+        # (например, `if not items: return None`). Если oracle противоречит
+        # draft'у по типу (return <-> exception) — доверяем draft'у, чтобы
+        # не выдумывать контракт для edge cases.
+        draft_exp = case.expected if isinstance(case.expected, Expected) else None
+        if draft_exp is not None and draft_exp.type != exp.type:
+            print(f"-> Oracle: тип {exp.type} противоречит draft {draft_exp.type}, оставляем draft")
+            refined.append(case)
+            continue
+        refined.append(case.model_copy(update={"expected": exp}))
     return refined
 
 
