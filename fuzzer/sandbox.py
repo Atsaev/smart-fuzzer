@@ -121,7 +121,7 @@ def _run_single_test(func_source, func_name, test_case_dict, result_queue):
             result_queue.put({"error": f"Функция {func_name} не найдена"})
             return
 
-        result = run_test(func, TestCase(**copy.deepcopy(test_case_dict)))
+        result = run_test(func, TestCase(**copy.deepcopy(test_case_dict)), func_source=func_source)
         result_queue.put({"result": result})
     except SyntaxError as e:
         result_queue.put({"error": f"Запрещённая конструкция: {e}"})

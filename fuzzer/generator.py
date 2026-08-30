@@ -151,27 +151,34 @@ def _build_prompt(function_code: str) -> str:
 
 Для каждого теста укажи:
 1. "input_data" — конкретные входные данные (только JSON-типы: string, number, boolean, null, array, object).
-2. "expected_behavior" — ОЖИДАЕМЫЙ результат: для возвращаемого значения — КОНКРЕТНОЕ значение ("returns 90.0", "returns 'user@example.com'"); для исключения — тип ("raises ValueError"). Без абстракций вроде "returns calculated discount".
+2. "expected" — СТРУКТУРИРОВАННОЕ ожидание:
+   - функция ДОЛЖНА вернуть значение: {{"type": "return", "value": <конкретное значение>}} — value: 90.0, value: "john doe", value: [1, 2];
+   - функция ДОЛЖНА вернуть None: {{"type": "return", "value": null}};
+   - функция ДОЛЖНА бросить исключение: {{"type": "exception", "name": "ValueError"}}.
 3. "category" — boundary, invalid, special, overflow, edge_combination.
 4. "reason" — короткое пояснение, почему тест важен.
 
-Правила:
-- expected_behavior — это КОНТРАКТ функции: что она ДОЛЖНА возвращать по смыслу (название, сигнатура, параметры), а НЕ то, что делает текущая реализация. Если код выглядит подозрительно (например, "clamp" возвращает maximum при value < minimum, или "normalize_name" удаляет внутренние пробелы) — ожидание всё равно по смыслу: clamp(5, 10, 20) должен дать "returns 10", normalize_name("John  Doe") — "returns 'john doe'" (внутренние пробелы сохраняются).
-- Для функций со строками обязательно включай тесты с внутренними пробелами ("John Doe"), краевыми пробелами и регистром.
-- Для функций с диапазонами (clamp и т.п.) обязательно включай value ниже минимума и выше максимума с КОНКРЕТНЫМИ ожиданиями.
-- Если функция по смыслу должна бросить исключение на данных — ожидай его явно ("raises TypeError"). Это НЕ ошибка функции.
-- Ожидаемое исключение должно совпадать с тем, что функция обязана бросить по контракту.
-- Не придумывай уязвимости там, где поведение соответствует контракту.
-- Только константные значения — никаких Python-выражений: без "a" * 100, без "a".repeat(255), без list comprehension, без вызовов функций.
+Критически важно:
+- expected — это КОНТРАКТ функции: что она ДОЛЖНА делать по смыслу (название, сигнатура, параметры), а НЕ то, что делает текущая реализация. Если код подозрительный (например, "clamp" возвращает maximum при value < minimum, или "normalize_name" удаляет внутренние пробелы) — ожидание всё равно по смыслу: clamp(5, 10, 20) -> value: 10; normalize_name("John  Doe") -> value: "john doe".
+- Для функций со строками обязательно включай тесты с внутренними пробелами ("John Doe"), краевыми пробелами, регистром.
+- Для функций с диапазонами (clamp и т.п.) обязательно включай value ниже минимума и выше максимума с конкретными ожиданиями.
+- Не подстраивай ожидания под возможные баги реализации.
+- Только константные значения — никаких Python-выражений: без "a" * 100, без "a".repeat(255), без вызовов функций.
 - Отвечай ТОЛЬКО валидным JSON массивом, без markdown, без пояснений.
 
 Формат ответа:
 [
   {{
-    "input_data": {{"param_name": value}},
-    "expected_behavior": "returns 90.0",
+    "input_data": {{"price": 100, "percent": 10}},
+    "expected": {{"type": "return", "value": 90.0}},
     "category": "boundary",
-    "reason": "почему важен"
+    "reason": "стандартная скидка"
+  }},
+  {{
+    "input_data": {{"price": "100"}},
+    "expected": {{"type": "exception", "name": "TypeError"}},
+    "category": "invalid",
+    "reason": "неверный тип"
   }}
 ]"""
 
@@ -190,15 +197,27 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
         )
         return response.choices[0].message.content
 
-    def try_parse(text: str) -> list | None:
+    def try_parse(text: str) -> list[TestCase] | None:
         try:
             content = extract_json(text)
             content = normalize_json(content)
             content = expand_python_exprs(content)
-            return parse_json(content)
+            raw = parse_json(content)
         except Exception as e:
             print(f"-> Парсинг не удался: {e}")
             return None
+        cases = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            # LLM иногда пишет input_data голым значением — оборачиваем
+            if not isinstance(item.get("input_data"), dict):
+                item["input_data"] = {"value": item.get("input_data")}
+            try:
+                cases.append(TestCase(**item))
+            except Exception as e:
+                print(f"-> Невалидный тест-кейс: {e}")
+        return cases or None
 
     raw_content = call_llm()
     print("-> RAW ответ (первые 300 символов):")
@@ -230,4 +249,4 @@ def generate_test_cases(function_code: str, function_name: str) -> list[TestCase
             f"Сырой ответ:\n{raw_content}"
         )
 
-    return [TestCase(**tc) for tc in result]
+    return result

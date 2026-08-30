@@ -1,35 +1,14 @@
-import ast
+"""Детерминированный классификатор: вердикт вычисляется кодом из
+структурированного ожидания (TestCase.expected) и фактического результата.
+LLM не участвует в принятии решения."""
+
 import copy
 import inspect
 import math
 import re
 from dataclasses import dataclass
 
-from models.schemas import TestCase, TestResult, TestStatus
-
-_EXCEPTION_RE = re.compile(
-    r"\b(TypeError|ValueError|KeyError|IndexError|ZeroDivisionError|"
-    r"AttributeError|OverflowError|RuntimeError|StopIteration|AssertionError|"
-    r"ImportError|NameError|OSError|PermissionError|TimeoutError|"
-    r"FileNotFoundError|UnicodeDecodeError|UnicodeEncodeError|UnicodeError|"
-    r"RecursionError|MemoryError|ArithmeticError|LookupError|EOFError|"
-    r"NotImplementedError|SyntaxError|IndentationError|TabError)\b",
-    re.IGNORECASE,
-)
-_EXCEPTION_HINT = re.compile(
-    r"\braise\b|\bexception\b|\bбросает\b|\bошибк\b", re.IGNORECASE
-)
-
-_QUOTED_VALUE_RE = re.compile(r"['\"]([^'\"]*)['\"]")
-_BOOL_VALUE_RE = re.compile(r"\b(True|False|true|false)\b")
-_NUMBER_VALUE_RE = re.compile(r"[-+]?\d+\.?\d*")
-_DICT_VALUE_RE = re.compile(r"\{.*\}", re.DOTALL)
-_EXPECTS_VALUE_RE = re.compile(
-    r"\breturns?\b|\bверн\w*\b|\bвозвращ\w*\b", re.IGNORECASE
-)
-_NON_VALUE_HINTS = ("none", "null", "ничего", "пуст", "empty")
-
-_RETURN_MARKER = "RETURN"
+from models.schemas import Expected, TestCase, TestResult, TestStatus
 
 # Исключения, которые функция бросает на некорректных входных данных:
 # их появление там, где ожидался нормальный возврат, — VULNERABILITY.
@@ -41,46 +20,10 @@ _VULN_EXCEPTIONS = (
     UnicodeDecodeError, UnicodeEncodeError, StopIteration,
 )
 
-
-def _parse_expectation(expected_behavior: str):
-    """Что ждёт тест: исключение (какого типа) или возврат значения."""
-    m = _EXCEPTION_RE.search(expected_behavior)
-    if m or _EXCEPTION_HINT.search(expected_behavior):
-        return m.group(0) if m else None
-    return _RETURN_MARKER
-
-
-def _parse_expected_value(expected_behavior: str):
-    """Конкретное ожидаемое значение из текста ожидания или None.
-
-    "returns {'id': 1}" -> dict; "returns 'a@b.c'" -> 'a@b.c';
-    "returns 90" -> 90; "возвращает True" -> True.
-
-    Если текст явно говорит про None/null/пустое значение — оракула нет
-    ("returns null because '1' is not 1" не должно давать ожидание "1").
-    """
-    low = expected_behavior.lower()
-    if any(h in low for h in _NON_VALUE_HINTS):
-        return None
-    m = _DICT_VALUE_RE.search(expected_behavior)
-    if m:
-        try:
-            value = ast.literal_eval(m.group(0))
-            if isinstance(value, dict):
-                return value
-        except (ValueError, SyntaxError):
-            pass
-    m = _QUOTED_VALUE_RE.search(expected_behavior)
-    if m:
-        return m.group(1)
-    m = _BOOL_VALUE_RE.search(expected_behavior)
-    if m:
-        return m.group(0).lower() == "true"
-    m = _NUMBER_VALUE_RE.search(expected_behavior)
-    if m:
-        token = m.group(0)
-        return float(token) if "." in token else int(token)
-    return None
+_ANNOTATION_TYPES = {
+    "int": int, "float": (int, float), "str": str, "list": list,
+    "dict": dict, "bool": bool, "bytes": bytes, "tuple": tuple, "set": set,
+}
 
 
 def _values_match(expected, actual):
@@ -105,94 +48,63 @@ def _values_match(expected, actual):
     return None
 
 
-def _expects_non_none(expected_behavior: str) -> bool:
-    """Текст ожидания подразумевает возврат значения, а не None."""
-    low = expected_behavior.lower()
-    if any(h in low for h in _NON_VALUE_HINTS):
-        return False
-    return bool(_EXPECTS_VALUE_RE.search(low))
-
-
-def _classify(test_case: TestCase, exc: BaseException | None, actual_value=None):
-    """Строгая классификация результата теста.
-
-    Исключения:
-      expected: TypeError, actual: TypeError   -> PASS
-      expected: ValueError, actual: TypeError  -> FAIL
-      expected: return, actual: TypeError      -> VULNERABILITY
-      expected: return, actual: NameError      -> ERROR (окружение/код)
-      expected: exception, actual: return      -> FAIL
-
-    Возвращаемые значения:
-      expected: 90,  actual: 90   -> PASS
-      expected: 90,  actual: -900 -> VULNERABILITY
-      expected: user, actual: None -> VULNERABILITY
-    """
-    expected = _parse_expectation(test_case.expected_behavior)
-
+def _classify(expected: Expected, exc: BaseException | None, actual_value):
+    """Чисто детерминированный вердикт по (контракт, фактический результат)."""
     if exc is None:
-        if expected != _RETURN_MARKER:
-            return TestStatus.VULNERABILITY, True
-        expected_value = _parse_expected_value(test_case.expected_behavior)
-        if expected_value is not None:
+        # функция вернула значение
+        if expected.type == "exception":
+            return TestStatus.VULNERABILITY, True  # ждали исключение — вернулась
+        if expected.value is None:
             if actual_value is None:
-                return TestStatus.VULNERABILITY, True
-            match = _values_match(expected_value, actual_value)
-            if match is False:
-                return TestStatus.VULNERABILITY, True
-        elif actual_value is None and _expects_non_none(test_case.expected_behavior):
-            return TestStatus.VULNERABILITY, True
+                return TestStatus.PASSED, False
+            return TestStatus.VULNERABILITY, True  # ждали None — вернулось значение
+        if actual_value is None:
+            return TestStatus.VULNERABILITY, True  # ждали значение — вернулся None
+        if _values_match(expected.value, actual_value) is False:
+            return TestStatus.VULNERABILITY, True  # неверное значение
         return TestStatus.PASSED, False
 
-    actual_name = type(exc).__name__
-    if expected == _RETURN_MARKER:
+    # функция бросила исключение
+    if expected.type == "return":
         if isinstance(exc, _VULN_EXCEPTIONS):
             return TestStatus.VULNERABILITY, True
         return TestStatus.ERROR, False
-    if expected is None:
+
+    if expected.name is None:
+        return TestStatus.PASSED, False  # ждали любое исключение
+    if expected.name.lower() == type(exc).__name__.lower():
         return TestStatus.PASSED, False
-    if expected.lower() == actual_name.lower():
-        return TestStatus.PASSED, False
-    # ожидали исключение другого типа
-    return TestStatus.VULNERABILITY, True
+    return TestStatus.VULNERABILITY, True  # другой тип исключения
 
 
-def _build_call(func, input_data):
-    """Собирает аргументы вызова по сигнатуре функции.
-
-    {"value": "8080"} для функции с одним параметром превращается в
-    позиционный аргумент "8080"; dict с несколькими ключами передаётся
-    целиком (типично для функций, принимающих dict).
-    """
+def _check_return_annotation(func_source: str, actual_value) -> str | None:
+    """Детерминированная проверка: фактический тип результата против
+    аннотации возврата (-> int / -> float / ...). Не зависит от LLM."""
     try:
-        params = list(inspect.signature(func).parameters.values())
-    except (ValueError, TypeError):
-        params = []
+        tree = ast_parse(func_source)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if isinstance(node, ast_FunctionDef):
+            returns = node.returns
+            if returns is None:
+                return None
+            name = returns.id if isinstance(returns, ast_Name) else None
+            if name in _ANNOTATION_TYPES and actual_value is not None:
+                if not isinstance(actual_value, _ANNOTATION_TYPES[name]):
+                    return (
+                        f"возвращаемое значение ({type(actual_value).__name__}) "
+                        f"не соответствует аннотации -> {name}"
+                    )
+            return None
+    return None
 
-    positional = [
-        p for p in params
-        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-    ]
-    has_var_kw = any(p.kind == p.VAR_KEYWORD for p in params)
-    has_var_args = any(p.kind == p.VAR_POSITIONAL for p in params)
 
-    if not positional and not has_var_args:
-        return (), (dict(input_data) if isinstance(input_data, dict) else {})
-
-    if len(positional) == 1 and not has_var_kw:
-        if isinstance(input_data, dict) and len(input_data) == 1:
-            value = next(iter(input_data.values()))
-        else:
-            value = input_data
-        return (value,), {}
-
-    if has_var_args and not positional:
-        return (input_data,), {}
-
-    if isinstance(input_data, dict):
-        return (), dict(input_data)
-
-    return (input_data,), {}
+# алиасы, чтобы не плодить импорты выше
+import ast as _ast
+ast_parse = _ast.parse
+ast_FunctionDef = _ast.FunctionDef
+ast_Name = _ast.Name
 
 
 @dataclass
@@ -233,10 +145,54 @@ def _outcomes_equal(o1: _Outcome, o2: _Outcome) -> bool:
     return _values_equal(o1.value, o2.value)
 
 
-def run_test(func, test_case: TestCase) -> TestResult:
+def _build_call(func, input_data):
+    """Собирает аргументы вызова по сигнатуре функции.
+
+    {"value": "8080"} для функции с одним параметром превращается в
+    позиционный аргумент "8080"; dict с несколькими ключами передаётся
+    целиком (типично для функций, принимающих dict).
+    """
+    try:
+        params = list(inspect.signature(func).parameters.values())
+    except (ValueError, TypeError):
+        params = []
+
+    positional = [
+        p for p in params
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    has_var_kw = any(p.kind == p.VAR_KEYWORD for p in params)
+    has_var_args = any(p.kind == p.VAR_POSITIONAL for p in params)
+
+    if not positional and not has_var_args:
+        return (), (dict(input_data) if isinstance(input_data, dict) else {})
+
+    if len(positional) == 1 and not has_var_kw:
+        if isinstance(input_data, dict) and len(input_data) == 1:
+            value = next(iter(input_data.values()))
+        else:
+            value = input_data
+        return (value,), {}
+
+    if has_var_args and not positional:
+        return (input_data,), {}
+
+    if isinstance(input_data, dict):
+        return (), dict(input_data)
+
+    return (input_data,), {}
+
+
+def run_test(func, test_case: TestCase, func_source: str | None = None) -> TestResult:
     """Выполняет тест дважды: проверяет мутацию входных данных и
-    стабильность результата при одинаковом входе."""
-    # deepcopy входных данных: функция не должна мутировать объекты теста
+    стабильность результата при одинаковом входе.
+
+    Детерминированные проверки (не зависят от LLM):
+    - вердикт по структурированному ожиданию;
+    - соответствие аннотации возврата;
+    - мутация входных данных;
+    - стабильность результата.
+    """
     args, kwargs = _build_call(func, copy.deepcopy(test_case.input_data))
     inputs_snapshot = copy.deepcopy((args, kwargs))
 
@@ -246,24 +202,35 @@ def run_test(func, test_case: TestCase) -> TestResult:
     mutated = (args, kwargs) != inputs_snapshot
     unstable = not _outcomes_equal(first, second)
 
-    status, is_vuln = _classify(test_case, first.exc, first.value)
+    status, is_vuln = _classify(test_case.expected, first.exc, first.value)
 
-    if status == TestStatus.PASSED and unstable:
-        return TestResult(
-            test_case=test_case,
-            status=TestStatus.VULNERABILITY,
-            actual_output=str(first.value) if first.exc is None else None,
-            error_message="нестабильное поведение: разные результаты при одинаковом входе",
-            is_vulnerability=True,
-        )
-    if status == TestStatus.PASSED and mutated:
-        return TestResult(
-            test_case=test_case,
-            status=TestStatus.VULNERABILITY,
-            actual_output=str(first.value) if first.exc is None else None,
-            error_message="входные данные были изменены функцией",
-            is_vulnerability=True,
-        )
+    if status == TestStatus.PASSED:
+        if func_source:
+            ann_error = _check_return_annotation(func_source, first.value)
+            if ann_error:
+                return TestResult(
+                    test_case=test_case,
+                    status=TestStatus.VULNERABILITY,
+                    actual_output=str(first.value) if first.exc is None else None,
+                    error_message=ann_error,
+                    is_vulnerability=True,
+                )
+        if unstable:
+            return TestResult(
+                test_case=test_case,
+                status=TestStatus.VULNERABILITY,
+                actual_output=str(first.value) if first.exc is None else None,
+                error_message="нестабильное поведение: разные результаты при одинаковом входе",
+                is_vulnerability=True,
+            )
+        if mutated:
+            return TestResult(
+                test_case=test_case,
+                status=TestStatus.VULNERABILITY,
+                actual_output=str(first.value) if first.exc is None else None,
+                error_message="входные данные были изменены функцией",
+                is_vulnerability=True,
+            )
 
     return TestResult(
         test_case=test_case,
