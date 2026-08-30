@@ -141,30 +141,76 @@
   .card .num { color: var(--accent); font-size: 12px; }
   .card p { color: var(--muted); font-size: 13px; }
 
-  /* pipeline */
-  .pipe {
-    display: flex;
-    align-items: stretch;
-    gap: 0;
-    flex-wrap: wrap;
-    margin-top: 14px;
+  /* pipeline — вертикальный таймлайн */
+  .timeline {
+    position: relative;
+    margin-top: 16px;
+    padding: 4px 0;
   }
-  .stage {
+  .timeline::before {
+    content: "";
+    position: absolute;
+    left: 15px;
+    top: 10px;
+    bottom: 10px;
+    width: 2px;
+    background: var(--border);
+  }
+  .tl-item {
+    position: relative;
+    display: flex;
+    gap: 18px;
+    padding: 10px 0;
+  }
+  .tl-num {
+    position: relative;
+    z-index: 1;
+    flex: 0 0 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--muted);
+  }
+  .tl-item.highlight .tl-num {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(55, 224, 138, 0.10);
+    box-shadow: 0 0 0 4px rgba(55, 224, 138, 0.08);
+  }
+  .tl-body {
+    flex: 1;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 12px 14px;
-    flex: 1 1 150px;
-    min-width: 150px;
+    padding: 12px 16px;
   }
-  .stage b { color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
-  .stage span { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
-  .arrow {
-    align-self: center;
-    color: var(--muted);
-    padding: 0 8px;
-    font-size: 18px;
+  .tl-item.highlight .tl-body {
+    border-color: rgba(55, 224, 138, 0.4);
   }
+  .tl-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .tl-title { font-weight: 700; font-size: 14px; color: var(--text); }
+  .tl-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border-radius: 4px;
+    padding: 2px 8px;
+  }
+  .tl-tag.input { color: var(--muted); background: var(--panel2); border: 1px solid var(--border); }
+  .tl-tag.llm { color: var(--blue); background: rgba(90, 169, 255, 0.08); border: 1px solid rgba(90, 169, 255, 0.3); }
+  .tl-tag.code { color: var(--accent); background: rgba(55, 224, 138, 0.08); border: 1px solid rgba(55, 224, 138, 0.25); }
+  .tl-desc { color: var(--muted); font-size: 13px; margin-top: 4px; }
 
   ol.steps { margin: 14px 0 0 20px; color: var(--muted); }
   ol.steps li { margin-bottom: 8px; }
@@ -329,10 +375,10 @@
       <span class="status-pill"><span class="ping"></span>open to work</span>
     </a>
     <div class="nav-links">
-      <a class="nav-link" href="/">GET /</a>
+      <a class="nav-link" href="/">GET /home</a>
       <a class="nav-link" href="/#projects">GET /projects</a>
       <a class="nav-link" href="/blog">GET /blog</a>
-      <a class="nav-link" href="""/resume">GET /resume</a>
+      <a class="nav-link" href="/resume">GET /resume</a>
       <a class="nav-link active" href="/fuzzer/">POST /fuzzer_test</a>
     </div>
   </div>
@@ -381,20 +427,56 @@
   <!-- ПАЙПЛАЙН -->
   <section id="pipeline">
     <h2>Как это работает</h2>
-    <div class="pipe">
-      <div class="stage"><b>Функция</b><span>код из редактора</span></div>
-      <div class="arrow">→</div>
-      <div class="stage"><b>LLM-генерация</b><span>10 тест-кейсов: input + expected + postconditions</span></div>
-      <div class="arrow">→</div>
-      <div class="stage"><b>Валидатор</b><span>отбрасывает невалидные тесты (типы, сигнатура)</span></div>
-      <div class="arrow">→</div>
-      <div class="stage"><b>Oracle</b><span>пересчёт expected по контракту без тела</span></div>
-      <div class="arrow">→</div>
-      <div class="stage"><b>Песочница</b><span>каждый тест в отдельном процессе</span></div>
-      <div class="arrow">→</div>
-      <div class="stage"><b>Компаратор</b><span>PASS / VULNERABILITY / ERROR</span></div>
-      <div class="arrow">→</div>
-      <div class="stage"><b>Отчёт</b><span>вердикты + LLM-summary</span></div>
+    <div class="timeline">
+      <div class="tl-item">
+        <div class="tl-num">01</div>
+        <div class="tl-body">
+          <div class="tl-head"><span class="tl-title">Функция</span><span class="tl-tag input">вход</span></div>
+          <div class="tl-desc">код из редактора</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-num">02</div>
+        <div class="tl-body">
+          <div class="tl-head"><span class="tl-title">LLM-генерация тестов</span><span class="tl-tag llm">LLM</span></div>
+          <div class="tl-desc">10 тест-кейсов: input_data + expected + postconditions</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-num">03</div>
+        <div class="tl-body">
+          <div class="tl-head"><span class="tl-title">Валидатор</span><span class="tl-tag code">код</span></div>
+          <div class="tl-desc">отбрасывает невалидные тесты: типы, сигнатура, неоправданные исключения</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-num">04</div>
+        <div class="tl-body">
+          <div class="tl-head"><span class="tl-title">Oracle</span><span class="tl-tag llm">LLM</span></div>
+          <div class="tl-desc">пересчёт expected по контракту — без тела функции</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-num">05</div>
+        <div class="tl-body">
+          <div class="tl-head"><span class="tl-title">Песочница</span><span class="tl-tag code">код</span></div>
+          <div class="tl-desc">RestrictedPython, отдельный процесс, лимиты CPU/памяти, таймаут</div>
+        </div>
+      </div>
+      <div class="tl-item highlight">
+        <div class="tl-num">06</div>
+        <div class="tl-body">
+          <div class="tl-head"><span class="tl-title">Компаратор</span><span class="tl-tag code">код</span></div>
+          <div class="tl-desc">детерминированный вердикт: PASS / VULNERABILITY / ERROR</div>
+        </div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-num">07</div>
+        <div class="tl-body">
+          <div class="tl-head"><span class="tl-title">Отчёт</span><span class="tl-tag llm">LLM</span></div>
+          <div class="tl-desc">объяснение вердиктов — LLM их не принимает</div>
+        </div>
+      </div>
     </div>
   </section>
 
